@@ -1,72 +1,119 @@
-# KriptoDropTR Bot 🤖
+# 🪂 KriptoDropTR Telegram Botu — Kurulum Kılavuzu
 
-Telegram grup karşılama ve airdrop takip botu.
+## 📦 Gereksinimler
+- Python 3.10+
+- pip
 
 ---
 
-## 🚀 Railway'de Kurulum
+## 🚀 Kurulum Adımları
 
-### 1. GitHub'a Yükle
+### 1. Gerekli kütüphaneleri yükle
 ```bash
-git init
-git add .
-git commit -m "ilk yükleme"
-git branch -M main
-git remote add origin https://github.com/KULLANICI_ADIN/REPO_ADIN.git
-git push -u origin main
+pip install -r requirements.txt
 ```
 
-### 2. Railway Projesi Oluştur
-1. [railway.app](https://railway.app) → **New Project**
-2. **Deploy from GitHub repo** seç
-3. Repoyu bağla → otomatik deploy başlar
+### 2. `config.py` dosyasını düzenle
+```python
+BOT_TOKEN   = "7123456789:AAFxxxxxx"   # BotFather'dan
+ADMIN_ID    = 987654321                 # Kendi Telegram ID'n
+GROUP_ID    = -1001234567890            # Grubun ID'si
+GROK_API_KEY = "xai-xxxxxxxxxxxxx"     # xAI dashboard'dan
+```
 
-### 3. Environment Variable Ekle
-Railway panelinde projeye tıkla → **Variables** sekmesi → **+ New Variable**:
+> **Telegram ID'ni nasıl öğrenirim?**  
+> @userinfobot veya @getmyid_bot'a mesaj at.
 
-| Key | Value |
-|-----|-------|
-| `BOT_TOKEN` | `BotFather'dan aldığın token` |
+> **Grup ID'sini nasıl öğrenirim?**  
+> Botu gruba admin olarak ekledikten sonra gruba `/start` yaz,  
+> konsol loglarında `chat_id` görünür.  
+> Ya da @getidsbot ile öğrenebilirsin.
 
-Değişkeni kaydedince Railway otomatik yeniden başlatır, bot aktif olur.
+### 3. Botu başlat
+```bash
+python bot.py
+```
 
 ---
 
-## 📋 Komutlar
+## 🛠 Özellikler
 
-### Herkes kullanabilir
+### Admin (DM üzerinden):
+| Özellik | Açıklama |
+|---|---|
+| ➕ Airdrop Ekle | Adım adım form ile airdrop ekle |
+| 📋 Airdropları Listele | Tüm airdropları admin görünümüyle gör |
+| ✏️ Airdrop Aktif/Pasif | Airdropleri geçici kapat/aç |
+| 🗑 Airdrop Sil | Kalıcı sil |
+| 📌 Sabitle | Öne çıkarılacak airdropları sabitle |
+| 📰 Haber Gönder | Grok AI ile konu bazlı haber oluştur, gruba gönder |
+| 📢 Duyuru Yap | Gruba manuel duyuru yaz |
+| 📊 İstatistikler | Toplam airdrop, haber ve kategori özeti |
+| 🔄 Grup Bilgisi | Üye sayısı ve grup detayları |
+
+### Kullanıcı (DM):
+| Özellik | Açıklama |
+|---|---|
+| 🪂 Aktif Airdroplar | Tüm aktif airdropları göster |
+| 📌 Öne Çıkanlar | Sabitlenmiş airdroplar |
+| 🔍 Kategoriye Göre | DeFi, NFT, GameFi vb. filtrele |
+| 📅 Son Eklenenler | En yeni 5 airdrop |
+| ❓ Yardım | Airdrop rehberi |
+
+### Grup komutları:
 | Komut | Açıklama |
-|-------|----------|
-| `/airdrops` | Aktif airdrop listesini göster |
-| `/istatistik` | Katılım istatistikleri (günlük/haftalık/aylık) |
-| `/yardim` | Tüm komutları listele |
+|---|---|
+| `/airdrops` | Aktif airdropları özet listele |
+| `/haberler` | Son haber başlıklarını listele |
+| `/start` | Bota özel mesaj atmaya yönlendir |
 
-### Admin komutları
-| Komut | Açıklama |
-|-------|----------|
-| `/airdropekle İsim \| Ödül \| Bitiş \| Link` | Yeni airdrop ekle |
-| `/airdropbitir <id>` | Airdropi sonlandır |
-| `/airdropsil <id>` | Listeden tamamen sil |
-| `/airdroptumu` | Aktif + bitmiş tüm airdropları gör |
+---
 
-**Airdrop ekleme örneği:**
-```
-/airdropekle Layer3 | 50 USDT | 31.12.2025 | https://layer3.xyz
-```
+## 🔐 Güvenlik Notları
+- Sadece `ADMIN_ID` olarak tanımladığın hesap admin paneline erişebilir.
+- Botu gruba **yönetici** olarak ekle (mesaj gönderebilmesi için).
+- `config.py` dosyasını asla paylaşma/commit etme.
 
 ---
 
 ## 📁 Dosya Yapısı
 ```
-├── bot.py           # Ana bot kodu
-├── requirements.txt # Python bağımlılıkları
-├── Procfile         # Railway başlatma komutu
-├── railway.toml     # Railway ayarları
-├── .gitignore       # Git'e yüklenmeyecek dosyalar
-└── README.md        # Bu dosya
+kriptodrop_bot/
+├── bot.py            # Ana bot kodu
+├── config.py         # Konfigürasyon (tokenlar burada)
+├── requirements.txt  # Python bağımlılıkları
+├── kriptodrop.db     # SQLite veritabanı (otomatik oluşur)
+└── bot.log           # Log dosyası (otomatik oluşur)
 ```
 
 ---
 
-## ⚠️ Not
-Airdrop verileri ve istatistikler **RAM'de** tutulur. Bot yeniden başlarsa (Railway restart, deploy vs.) veriler sıfırlanır. Kalıcı depolama için Railway'e PostgreSQL eklentisi bağlanabilir.
+## 🔧 Sürekli Çalıştırma (Linux/VPS)
+
+### systemd servisi olarak:
+```bash
+sudo nano /etc/systemd/system/kriptodrop.service
+```
+```ini
+[Unit]
+Description=KriptoDropTR Telegram Bot
+After=network.target
+
+[Service]
+WorkingDirectory=/home/user/kriptodrop_bot
+ExecStart=/usr/bin/python3 bot.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+```bash
+sudo systemctl enable kriptodrop && sudo systemctl start kriptodrop
+```
+
+### screen ile (basit yöntem):
+```bash
+screen -S kriptobot
+python bot.py
+# Ctrl+A → D ile çıkış
+```

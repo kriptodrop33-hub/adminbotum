@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║          TELEGRAM GRUP YÖNETİM BOTU  v3.0                   ║
+║          TELEGRAM GRUP YÖNETİM BOTU  v3.1                   ║
 ║  • Tüm işlemler DM'deki inline butonlardan yapılır           ║
 ║  • Bot senden adım adım bilgi ister (ID, miktar vs.)         ║
 ║  • Açıklayıcı, uzun panel metinleri                          ║
@@ -10,6 +10,7 @@
 
 import logging
 import os
+import json
 import asyncio
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -39,49 +40,98 @@ ADMIN_ID  = int(os.environ["ADMIN_ID"])
 GROUP_ID  = int(os.environ["GROUP_ID"])
 
 # ──────────────────────────────────────────────────────────────
-# UYGULAMA DURUMU
+# VERİ DOSYASI — Bot yeniden başlayınca veriler korunur
 # ──────────────────────────────────────────────────────────────
-warnings_db    : dict[int, int]      = {}   # user_id → uyarı sayısı
-muted_users    : dict[int, datetime] = {}
-banned_words   : list[str]           = []
-notes          : dict[str, str]      = {}
-welcome_msg    : str  = "🎉 <b>KriptoDrop TR</b> Kanalımıza Hoş Geldiniz, {name}! 🎁\n\n🚀 Güncel airdroplardan anında haberdar olmak için\n\n🔔 <b>KriptoDrop TR DUYURU</b> 📢 Kanalımıza katılmayı ve kanal bildirimlerini açmayı unutmayın!\n\n\U0001F48E Bol kazançlar dileriz!"
-auto_delete_sec: int  = 0
-antiflood_on   : bool = True
-antiflood_buf  : dict[int, list]     = {}
-group_locked   : bool = False
-slowmode_sec   : int  = 0
+DATA_FILE = "bot_data.json"
 
-# ── Davet Takibi ──────────────────────────────────────────────
-# invite_tracker[user_id] = {"name": str, "count": int}
-invite_tracker : dict[int, dict]     = {}
+def load_data() -> dict:
+    """JSON dosyasından verileri yükle."""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Veri yükleme hatası: {e}")
+    return {}
 
-# ── Zamanlı Duyuru ────────────────────────────────────────────
-scheduled_msg_text : str  = (
+def save_data():
+    """Tüm kalıcı verileri JSON dosyasına kaydet."""
+    data = {
+        "warnings_db"       : warnings_db,
+        "banned_words"      : banned_words,
+        "notes"             : notes,
+        "invite_tracker"    : invite_tracker,
+        "welcome_msg"       : welcome_msg,
+        "auto_delete_sec"   : auto_delete_sec,
+        "antiflood_on"      : antiflood_on,
+        "group_locked"      : group_locked,
+        "slowmode_sec"      : slowmode_sec,
+        "scheduled_msg_text": scheduled_msg_text,
+        "scheduled_msg_hour": scheduled_msg_hour,
+        "scheduled_msg_min" : scheduled_msg_min,
+        "scheduled_msg_on"  : scheduled_msg_on,
+    }
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Veri kaydetme hatası: {e}")
+
+# ──────────────────────────────────────────────────────────────
+# UYGULAMA DURUMU — Kalıcı verilerle başlat
+# ──────────────────────────────────────────────────────────────
+_d = load_data()
+
+warnings_db    : dict  = _d.get("warnings_db", {})
+# JSON anahtarları string olur, int'e çevir
+warnings_db    = {int(k): v for k, v in warnings_db.items()}
+
+muted_users    : dict  = {}   # Sadece runtime (TTL süreli, persist gerekmez)
+banned_words   : list  = _d.get("banned_words", [])
+notes          : dict  = _d.get("notes", {})
+welcome_msg    : str   = _d.get("welcome_msg",
+    "🎉 <b>KriptoDrop TR</b> Kanalımıza Hoş Geldiniz, {name}! 🎁\n\n"
+    "🚀 Güncel airdroplardan anında haberdar olmak için\n\n"
+    "🔔 <b>KriptoDrop TR DUYURU</b> 📢 Kanalımıza katılmayı ve "
+    "kanal bildirimlerini açmayı unutmayın!\n\n\U0001F48E Bol kazançlar dileriz!"
+)
+auto_delete_sec: int   = _d.get("auto_delete_sec", 0)
+antiflood_on   : bool  = _d.get("antiflood_on", True)
+antiflood_buf  : dict  = {}
+group_locked   : bool  = _d.get("group_locked", False)
+slowmode_sec   : int   = _d.get("slowmode_sec", 0)
+
+# Davet takibi — runtime (yeniden başlayınca sıfırlanır, isteğe göre persist eklenebilir)
+invite_tracker : dict  = {int(k): v for k, v in _d.get("invite_tracker", {}).items()}
+
+# Zamanlı duyuru
+scheduled_msg_text : str  = _d.get("scheduled_msg_text",
     "📢 <b>KriptoDrop TR — Günlük Hatırlatma</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     "🚀 Bugünün güncel airdroplarını kaçırmamak için\n"
     "🔔 <b>KriptoDrop TR DUYURU</b> kanalımıza abone olun ve bildirimleri açın!\n\n"
     "\U0001F48E Bol kazançlar dileriz!"
 )
-scheduled_msg_hour  : int  = 9    # UTC saat (09:00 UTC = Türkiye 12:00 yaz saati)
-scheduled_msg_min   : int  = 0
-scheduled_msg_on    : bool = True  # Zamanlı duyuru aktif mi
+scheduled_msg_hour  : int  = _d.get("scheduled_msg_hour", 9)
+scheduled_msg_min   : int  = _d.get("scheduled_msg_min", 0)
+scheduled_msg_on    : bool = _d.get("scheduled_msg_on", True)
 
-stats: dict[str, int] = {
+stats: dict = {
     "total_messages"  : 0,
     "deleted_messages": 0,
     "banned_users"    : 0,
     "warned_users"    : 0,
 }
 
-# "Bekleme" durumu: hangi adımda olduğumuzu tutar
+# Bekleme durumu: hangi adımda olduğumuzu tutar
 # pending[user_id] = {"action": str, "data": dict}
-pending: dict[int, dict] = {}
+pending: dict = {}
 
 # /select ile seçilen başlangıç mesaj ID'leri
-# select_start[chat_id] = başlangıç_mesaj_id
-select_start: dict[int, int] = {}
+select_start: dict = {}
+
+# Telegram'ın kabul ettiği yavaş mod değerleri (saniye)
+VALID_SLOWMODE = [0, 10, 30, 45, 60, 90, 180, 300, 600, 900]
 
 # ──────────────────────────────────────────────────────────────
 # YARDIMCILAR
@@ -103,33 +153,32 @@ async def auto_delete(ctx, chat_id: int, msg_id: int, delay: int):
         pass
 
 async def _bulk_delete(ctx, chat_id: int, from_id: int, to_id: int) -> int:
-    """from_id'den to_id'ye kadar (to_id dahil) tüm mesajları 100'lük batch'lerle siler.
-    Telegram delete_messages API'si max 100 ID kabul eder.
-    Döner: silinen mesaj sayısı."""
+    """from_id'den to_id'ye kadar (to_id dahil) tüm mesajları 100'lük batch'lerle siler."""
     if from_id < to_id:
-        from_id, to_id = to_id, from_id  # her zaman from_id >= to_id
+        from_id, to_id = to_id, from_id
 
-    all_ids = list(range(to_id, from_id + 1))  # küçükten büyüğe
+    all_ids = list(range(to_id, from_id + 1))
     deleted = 0
 
-    # 100'lük batch'lere böl
     for i in range(0, len(all_ids), 100):
         batch = all_ids[i:i + 100]
         try:
-            # delete_messages toplu silme (Python-telegram-bot 20+)
             await ctx.bot.delete_messages(chat_id, batch)
             deleted += len(batch)
         except TelegramError:
-            # Toplu başarısız olursa tek tek dene
             for mid in batch:
                 try:
                     await ctx.bot.delete_message(chat_id, mid)
                     deleted += 1
                 except TelegramError:
                     pass
-        await asyncio.sleep(0.05)  # rate limit
+        await asyncio.sleep(0.05)
 
     return deleted
+
+def nearest_slowmode(val: int) -> int:
+    """Girilen değere en yakın geçerli yavaş mod değerini döndürür."""
+    return min(VALID_SLOWMODE, key=lambda x: abs(x - val))
 
 def back_btn(target="main") -> InlineKeyboardMarkup:
     labels = {
@@ -147,7 +196,7 @@ def back_btn(target="main") -> InlineKeyboardMarkup:
 # ANA MENÜ
 # ──────────────────────────────────────────────────────────────
 MAIN_MENU_TEXT = (
-    "🤖 <b>Grup Yönetim Paneli — v3.0</b>\n"
+    "🤖 <b>Grup Yönetim Paneli — v3.1</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     "Bu panel üzerinden grubunu <b>tek tıkla</b> yönetebilirsin.\n"
     "Aşağıdaki kategorilerden birini seç ve işlemini gerçekleştir.\n\n"
@@ -182,9 +231,9 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     ])
 
 # ──────────────────────────────────────────────────────────────
-# KATEGORİ MENÜLERİ — Metin + Butonlar
+# KATEGORİ MENÜLERİ
 # ──────────────────────────────────────────────────────────────
-def users_menu() -> tuple[str, InlineKeyboardMarkup]:
+def users_menu() -> tuple:
     text = (
         "👥 <b>Kullanıcı Yönetimi</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -200,8 +249,7 @@ def users_menu() -> tuple[str, InlineKeyboardMarkup]:
         "⬆️ <b>Admin Yap</b> — Kullanıcıyı grup yöneticisi yapar.\n"
         "⬇️ <b>Admin'den Al</b> — Kullanıcının yönetici yetkilerini iptal eder.\n"
         "👤 <b>Kullanıcı Bilgisi</b> — ID, kullanıcı adı, grup durumu ve uyarı sayısını gösterir.\n\n"
-        "💡 Bir işleme tıkladıktan sonra bot senden <b>kullanıcı ID'sini</b> veya gruba iletmek için "
-        "<b>mesajı yanıtlamanı</b> isteyecek."
+        "💡 Bir işleme tıkladıktan sonra bot senden <b>kullanıcı ID'sini</b> isteyecek."
     )
     kb = InlineKeyboardMarkup([
         [
@@ -229,26 +277,20 @@ def users_menu() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
-def msgs_menu() -> tuple[str, InlineKeyboardMarkup]:
+def msgs_menu() -> tuple:
     text = (
         "📢 <b>Mesaj Yönetimi</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Gruptaki mesajları bu bölümden yönetebilirsin.\n\n"
-        "📌 <b>Mesaj Sabitle</b> — Gruba gidip bir mesajı yanıtla, sonra bu butona bas. "
-        "Mesaj grubun en üstüne sabitlenir ve tüm üyeler görebilir.\n"
+        "📌 <b>Mesaj Sabitle</b> — Gruba gidip bir mesajı yanıtla, sonra bu butona bas.\n"
         "📌 <b>Sabitlemeyi Kaldır</b> — Aktif sabitlenmiş mesajı kaldırır.\n"
         "🗑️ <b>Mesaj Sil</b> — Belirli bir mesajı grubun içinden kaldırır.\n"
-        "🧹 <b>Son N Mesajı Sil</b> — İstediğin kadar mesajı toplu siler. "
-        "Kaç mesaj sileceğini girdikten sonra <b>onay butonu</b> gelir.\n"
-        "💣 <b>Son 100 Mesajı Sil</b> — Grubun son 100 mesajını tek seferde temizler. "
-        "Onay gerektirir, geri alınamaz!\n"
-        "⏩ <b>Şu Mesajdan Sonrasını Sil</b> — Grupta bir mesajı <b>yanıtlayıp</b> "
-        "<code>/purgefrom</code> yaz. O mesajdan en sona kadar her şey silinir. "
-        "Panelden de başlatabilirsin — bot seni grupta reply yapmaya yönlendirir.\n"
+        "🧹 <b>Son N Mesajı Sil</b> — İstediğin kadar mesajı toplu siler.\n"
+        "💣 <b>Son 100 Mesajı Sil</b> — Grubun son 100 mesajını tek seferde temizler.\n"
+        "⏩ <b>Şu Mesajdan Sonrasını Sil</b> — O mesajdan en sona kadar her şey silinir.\n"
         "📣 <b>Duyuru Gönder</b> — Gruba resmi formatta bir duyuru mesajı gönderir.\n"
-        "📊 <b>Anket Oluştur</b> — Grup içinde interaktif bir anket başlatır. "
-        "Kullanım: <code>Soru?|Seçenek1|Seçenek2|Seçenek3</code>\n\n"
-        "⚠️ <b>Dikkat:</b> Silme işlemleri geri alınamaz! Onay butonları tam bu yüzden var."
+        "📊 <b>Anket Oluştur</b> — Grup içinde interaktif bir anket başlatır.\n\n"
+        "⚠️ <b>Dikkat:</b> Silme işlemleri geri alınamaz!"
     )
     kb = InlineKeyboardMarkup([
         [
@@ -271,26 +313,21 @@ def msgs_menu() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
-def settings_menu() -> tuple[str, InlineKeyboardMarkup]:
-    lock_icon = "🔓 Grubu Aç" if group_locked else "🔒 Grubu Kilitle"
-    lock_cb   = "act_unlock" if group_locked else "act_lock"
+def settings_menu() -> tuple:
+    lock_icon  = "🔓 Grubu Aç" if group_locked else "🔒 Grubu Kilitle"
+    lock_cb    = "act_unlock"  if group_locked else "act_lock"
     flood_icon = "🌊 Anti-Flood: ✅" if antiflood_on else "🌊 Anti-Flood: ❌"
+    valid_str  = ", ".join(str(v) for v in VALID_SLOWMODE)
     text = (
         "⚙️ <b>Grup Ayarları</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Grubun genel davranışını bu bölümden özelleştirebilirsin.\n\n"
-        "👋 <b>Karşılama Mesajı</b> — Gruba yeni üye katıldığında otomatik gönderilir. "
-        "Metinde <code>{name}</code> (üye adı), <code>{group}</code> (grup adı), "
-        "<code>{id}</code> (kullanıcı ID) kullanabilirsin.\n"
-        "🔒 <b>Grubu Kilitle</b> — Sadece adminlerin yazabildiği mod. Etkinleşince "
-        "normal üyeler mesaj gönderemez. Duyuru/önemli an için ideal.\n"
+        "👋 <b>Karşılama Mesajı</b> — Gruba yeni üye katıldığında otomatik gönderilir.\n"
+        "🔒 <b>Grubu Kilitle</b> — Sadece adminlerin yazabildiği mod.\n"
         "🔓 <b>Grubu Aç</b> — Kilidi kaldırır, herkes tekrar yazabilir.\n"
-        "🐌 <b>Yavaş Mod</b> — Üyeler arasına saniye cinsinden bekleme ekler. "
-        "Örn: 30 saniye → her üye 30 saniyede bir mesaj atabilir.\n"
-        "⏱️ <b>Otomatik Mesaj Silme</b> — Her mesaj belirtilen süre sonra otomatik silinir. "
-        "0 girerek kapatabilirsin. Spam'e karşı çok etkili!\n"
-        f"🌊 <b>Anti-Flood</b> — Şu an: <b>{'Aktif ✅' if antiflood_on else 'Pasif ❌'}</b>. "
-        "10 saniye içinde 5'ten fazla mesaj atan üyeyi otomatik 5 dakika susturur.\n"
+        f"🐌 <b>Yavaş Mod</b> — Geçerli değerler (sn): <code>{valid_str}</code>\n"
+        "⏱️ <b>Otomatik Mesaj Silme</b> — Her mesaj belirtilen süre sonra otomatik silinir.\n"
+        f"🌊 <b>Anti-Flood</b> — Şu an: <b>{'Aktif ✅' if antiflood_on else 'Pasif ❌'}</b>.\n"
         "🔗 <b>Yeni Davet Linki</b> — Mevcut linki geçersiz kılar, yeni link oluşturur.\n\n"
         f"📌 <b>Mevcut Durum:</b> Kilit: {'🔒 Kilitli' if group_locked else '🔓 Açık'} | "
         f"Yavaş mod: {slowmode_sec}sn | Otomatik silme: {auto_delete_sec}sn"
@@ -314,24 +351,19 @@ def settings_menu() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
-def security_menu() -> tuple[str, InlineKeyboardMarkup]:
+def security_menu() -> tuple:
     text = (
         "🛡️ <b>Güvenlik & Filtreler</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Grubunu istenmeyen içeriklerden korumak için filtreler ve otomatik önlemler.\n\n"
-        "🚫 <b>Yasaklı Kelime Ekle</b> — Eklediğin kelimeyi içeren her mesaj otomatik silinir "
-        "ve kullanıcıya uyarı mesajı gönderilir. Küçük/büyük harf fark etmez.\n"
+        "🚫 <b>Yasaklı Kelime Ekle</b> — Eklediğin kelimeyi içeren her mesaj otomatik silinir.\n"
         "✅ <b>Yasaklı Kelime Sil</b> — Listeden bir kelimeyi kaldırır.\n"
         "📋 <b>Yasaklı Kelime Listesi</b> — Aktif tüm filtre kelimelerini listeler.\n\n"
         "🤖 <b>Otomatik Güvenlik Sistemleri:</b>\n\n"
         "   🌊 <b>Anti-Flood</b> — 10 saniye içinde 5'ten fazla mesaj gönderen üye "
-        "otomatik olarak 5 dakika susturulur. Bot sana bildirim gönderir.\n\n"
-        "   ⚠️ <b>Uyarı Sistemi</b> — Uyarılar birikir. Bir kullanıcı 3 uyarıya ulaşırsa "
-        "sistem otomatik olarak banlar. Manuel müdahaleye gerek kalmaz.\n\n"
-        "   🔤 <b>Kelime Filtresi</b> — Yasaklı kelime içeren mesaj silinir, kullanıcı "
-        "uyarılır, sen bildirim alırsın.\n\n"
-        "   👤 <b>Yeni Üye Bildirimi</b> — Birisi gruba katıldığında anında DM bildirimi "
-        "alırsın: kim katıldı, ID'si nedir.\n\n"
+        "otomatik olarak 5 dakika susturulur.\n\n"
+        "   ⚠️ <b>Uyarı Sistemi</b> — 3 uyarıda otomatik ban.\n\n"
+        "   🔤 <b>Kelime Filtresi</b> — Yasaklı kelime içeren mesaj silinir.\n\n"
         f"📊 <b>Aktif Filtre Sayısı:</b> {len(banned_words)} kelime"
     )
     kb = InlineKeyboardMarkup([
@@ -352,20 +384,16 @@ def security_menu() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
-def notes_menu() -> tuple[str, InlineKeyboardMarkup]:
+def notes_menu() -> tuple:
     note_count = len(notes)
     note_list  = ", ".join(f"#{k}" for k in list(notes.keys())[:10]) or "Henüz not yok"
     text = (
         "📝 <b>Not Sistemi</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Sık kullandığın metinleri, kuralları, linkleri not olarak kaydet. "
-        "İstediğinde tek komutla gruba gönder!\n\n"
-        "💾 <b>Not Kaydet</b> — Bot senden not adı ve içeriğini isteyecek. "
-        "Kaydettikten sonra grupta <code>#notadı</code> yazarak veya "
-        "<code>/note notadı</code> komutuyla gösterebilirsin.\n\n"
-        "📖 <b>Notu Gruba Gönder</b> — Seçtiğin notu direkt gruba iletir. "
-        "Kurallar, duyurular veya sık sorulan sorular için süper pratik!\n\n"
-        "📋 <b>Tüm Notları Listele</b> — Kayıtlı tüm notların adlarını görürsün.\n\n"
+        "Sık kullandığın metinleri, kuralları, linkleri not olarak kaydet.\n\n"
+        "💾 <b>Not Kaydet</b> — Bot senden not adı ve içeriğini isteyecek.\n"
+        "📖 <b>Notu Gruba Gönder</b> — Seçtiğin notu direkt gruba iletir.\n"
+        "📋 <b>Tüm Notları Listele</b> — Kayıtlı tüm notların adlarını görürsün.\n"
         "🗑️ <b>Not Sil</b> — Artık kullanmadığın bir notu listeden kaldırır.\n\n"
         "💡 <b>Kısayol:</b> Grupta herhangi biri <code>#notadı</code> yazarsa "
         "bot otomatik olarak o notu yanıt olarak gönderir!\n\n"
@@ -385,21 +413,16 @@ def notes_menu() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
-def info_menu() -> tuple[str, InlineKeyboardMarkup]:
+def info_menu() -> tuple:
     text = (
         "📊 <b>Bilgi & İstatistik</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Grup ve kullanıcılar hakkında detaylı bilgiye buradan ulaşabilirsin.\n\n"
-        "👤 <b>Kullanıcı Bilgisi</b> — Bir kullanıcının Telegram adı, ID, kullanıcı adı, "
-        "gruptaki rolü (üye/admin/banlı) ve kaç uyarı aldığını gösterir.\n\n"
-        "🏘️ <b>Grup Bilgisi</b> — Grubun adı, ID'si, üye sayısı, açıklaması, "
-        "davet linki, kilit durumu ve yavaş mod ayarlarını gösterir.\n\n"
-        "👥 <b>Üye Sayısı</b> — Grubun anlık üye sayısını hızlıca sorgular.\n\n"
-        "📈 <b>Bot İstatistikleri</b> — Botun bu oturumda yaptıklarının özeti: "
-        "toplam işlenen mesaj sayısı, silinen mesajlar, banlanan kullanıcılar, "
-        "uyarılan kullanıcılar, aktif filtreler, kayıtlı notlar ve tüm ayarların durumu.\n\n"
-        "🆔 <b>ID Göster</b> — Kendi Telegram ID'ni ve o andaki chat ID'sini gösterir. "
-        "Bot kurulumunda GROUP_ID bulmak için kullanışlıdır."
+        "👤 <b>Kullanıcı Bilgisi</b> — Telegram adı, ID, gruptaki rolü ve uyarı sayısı.\n\n"
+        "🏘️ <b>Grup Bilgisi</b> — Grubun adı, ID'si, üye sayısı, kilit ve yavaş mod ayarları.\n\n"
+        "👥 <b>Üye Sayısı</b> — Grubun anlık üye sayısını sorgular.\n\n"
+        "📈 <b>Bot İstatistikleri</b> — Toplam mesaj, silinen mesaj, ban, uyarı özetleri.\n\n"
+        "🆔 <b>ID Göster</b> — Kendi Telegram ID'ni ve grup ID'sini gösterir."
     )
     kb = InlineKeyboardMarkup([
         [
@@ -417,7 +440,7 @@ def info_menu() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
-def invites_menu() -> tuple[str, InlineKeyboardMarkup]:
+def invites_menu() -> tuple:
     if not invite_tracker:
         board = "📭 Henüz davet verisi yok.\n\nBir üye gruba davet linki ile katıldığında burada görünür."
     else:
@@ -431,8 +454,7 @@ def invites_menu() -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "🏆 <b>Davet Liderlik Tablosu</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Bu bölümden kimin kaç üye davet ettiğini görebilirsin.\n"
-        "Bot, yeni üye katılımlarını otomatik takip eder.\n\n"
+        "Bu bölümden kimin kaç üye davet ettiğini görebilirsin.\n\n"
         f"{board}\n\n"
         "💡 Tabloyu sıfırlamak için Sıfırla butonuna bas."
     )
@@ -448,13 +470,12 @@ def invites_menu() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
-def scheduled_menu() -> tuple[str, InlineKeyboardMarkup]:
+def scheduled_menu() -> tuple:
     status_icon = "✅ Aktif" if scheduled_msg_on else "❌ Pasif"
     text = (
         "⏰ <b>Zamanlı Duyuru Ayarları</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Her gün belirlediğin saatte gruba otomatik duyuru gönderilir.\n"
-        "Duyuru, karşılama mesajıyla aynı 3 butonla gönderilir.\n\n"
+        "Her gün belirlediğin saatte gruba otomatik duyuru gönderilir.\n\n"
         f"📅 <b>Mevcut Ayarlar:</b>\n"
         f"🕐 Gönderim saati (UTC): <b>{scheduled_msg_hour:02d}:{scheduled_msg_min:02d}</b>\n"
         f"   (Türkiye saati ≈ {(scheduled_msg_hour + 3) % 24:02d}:{scheduled_msg_min:02d})\n"
@@ -477,52 +498,60 @@ def scheduled_menu() -> tuple[str, InlineKeyboardMarkup]:
     return text, kb
 
 # ──────────────────────────────────────────────────────────────
-# ACTİON AÇIKLAMALARI (kullanıcıya bilgi ister)
+# ACTİON AÇIKLAMALARI
 # ──────────────────────────────────────────────────────────────
-ACTION_PROMPTS = {
-    "act_ban"       : "🔨 <b>Kullanıcı Banla</b>\n\nBanlamak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n(Opsiyonel: ID'nin ardından boşluk bırakıp neden yazabilirsin)\n\nÖrnek: <code>123456789 spam yapıyor</code>",
-    "act_unban"     : "✅ <b>Ban Kaldır</b>\n\nBanını kaldırmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
-    "act_kick"      : "👢 <b>Kullanıcı At</b>\n\nAtmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n(Kullanıcı daha sonra tekrar girebilir)\n\nÖrnek: <code>123456789</code>",
-    "act_mute"      : "🔇 <b>Kullanıcı Sustur</b>\n\nSusturmak istediğin kullanıcının <b>ID ve dakika süresini</b> gönder.\n\nÖrnek: <code>123456789 30</code>\n(Süre girmezsen varsayılan 60 dakika uygulanır)",
-    "act_unmute"    : "🔊 <b>Sesi Aç</b>\n\nSusturmasını kaldırmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
-    "act_warn"      : "⚠️ <b>Uyarı Ver</b>\n\nUyarmak istediğin kullanıcının <b>ID ve uyarı nedenini</b> gönder.\n⚡ 3 uyarıda otomatik ban!\n\nÖrnek: <code>123456789 kurallara uymadı</code>",
-    "act_unwarn"    : "🔄 <b>Uyarı Sıfırla</b>\n\nUyarılarını sıfırlamak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
-    "act_warnings"  : "📊 <b>Uyarı Sorgula</b>\n\nUyarılarını sorgulamak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
-    "act_promote"   : "⬆️ <b>Admin Yap</b>\n\nAdmin yapmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\nKullanıcıya: mesaj silme, üye kısıtlama, mesaj sabitleme yetkileri verilecek.\n\nÖrnek: <code>123456789</code>",
-    "act_demote"    : "⬇️ <b>Admin'den Al</b>\n\nYetkilerini iptal etmek istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
-    "act_info"      : "👤 <b>Kullanıcı Bilgisi</b>\n\nBilgilerini görmek istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
-    "act_pin"       : "📌 <b>Mesaj Sabitle</b>\n\nSabitlemek istediğin mesajın <b>mesaj ID'sini</b> gönder.\n\n💡 Gruba git, mesajın üzerine tıkla → Detaylar → Message ID'yi kopyala.\n\nÖrnek: <code>1234</code>",
-    "act_delete"    : "🗑️ <b>Mesaj Sil</b>\n\nSilmek istediğin mesajın <b>mesaj ID'sini</b> gönder.\n\n💡 Gruba git, mesajın üzerine tıkla → Detaylar → Message ID'yi kopyala.\n\nÖrnek: <code>1234</code>",
-    "act_purge_ask"  : "🧹 <b>Son N Mesajı Sil</b>\n\nKaç mesaj silmek istediğini yaz.\n📌 Maksimum: 200 mesaj\n⚠️ Bu işlem geri alınamaz!\n\nÖrnek: <code>20</code>\n\n10, 20, 50, 100 gibi bir sayı gir:",
-    "act_purge_after": "⏩ <b>Şu Mesajdan Sonrasını Sil</b>\n\nGruba git, silmenin başlamasını istediğin mesajı <b>yanıtla (reply)</b> ve şunu yaz:\n\n<code>/purgefrom</code>\n\nBot onay isteyecek, onayladıktan sonra o mesajdan en sona kadar her şey silinecek.",
-    "act_broadcast" : "📣 <b>Gruba Duyuru Gönder</b>\n\nDuyuru metnini yaz. Mesaj resmi duyuru formatında (<b>DUYURU</b> başlığıyla) gruba gönderilecek.\n\nHTML etiketlerini kullanabilirsin: <code>&lt;b&gt;kalın&lt;/b&gt;</code>, <code>&lt;i&gt;italik&lt;/i&gt;</code>\n\nDuyuru metni:",
-    "act_poll"      : "📊 <b>Anket Oluştur</b>\n\nSoru ve seçenekleri <b>| (boru çizgisi)</b> ile ayırarak gönder.\nEn az 2, en fazla 10 seçenek ekleyebilirsin.\n\nFormat: <code>Soru?|Seçenek1|Seçenek2|Seçenek3</code>\n\nÖrnek: <code>En sevdiğiniz dil hangisi?|Python|JavaScript|Go|Rust</code>",
-    "act_setwelcome": "👋 <b>Karşılama Mesajı Ayarla</b>\n\nYeni karşılama metnini yaz. HTML formatı desteklenir.\n\n🔑 <b>Kullanılabilir değişkenler:</b>\n• <code>{name}</code> → Üyenin adı\n• <code>{id}</code> → Üyenin ID'si\n• <code>{group}</code> → Grubun adı\n\nÖrnek:\n<code>Merhaba {name}! Grubumuz {group}'a hoş geldin! 🎉</code>",
-    "act_slowmode"  : "🐌 <b>Yavaş Mod Ayarla</b>\n\nKaç saniyelik yavaş mod istiyorsun? Sıfır (0) girerek kapatabilirsin.\n\n📌 Önerilen değerler:\n• <code>0</code> → Kapat\n• <code>10</code> → 10 saniye\n• <code>30</code> → 30 saniye\n• <code>60</code> → 1 dakika\n\nSaniye cinsinden değer:",
-    "act_autodelete": "⏱️ <b>Otomatik Mesaj Silme</b>\n\nKaç saniye sonra mesajlar otomatik silinsin? Sıfır (0) girerek kapatabilirsin.\n\n📌 Önerilen değerler:\n• <code>0</code> → Kapat\n• <code>3600</code> → 1 saat\n• <code>86400</code> → 1 gün\n• <code>604800</code> → 1 hafta\n\nSaniye cinsinden değer:",
-    "act_addban"    : "🚫 <b>Yasaklı Kelime Ekle</b>\n\nFiltrelemek istediğin kelimeyi yaz.\n\n⚠️ Bu kelimeyi içeren her mesaj otomatik silinecek ve kullanıcı uyarılacak!\n\nBirden fazla kelime için ayrı ayrı gönderebilirsin.\n\nKelimeyi yaz:",
-    "act_removeban" : "✅ <b>Yasaklı Kelime Kaldır</b>\n\nListeden kaldırmak istediğin kelimeyi yaz.\n\nMevcut kelimeler: " + (", ".join(f"<code>{w}</code>" for w in banned_words) or "Liste boş"),
-    "act_savenote"  : "💾 <b>Not Kaydet</b>\n\nÖnce not adını, sonra bir boşluk bırakıp içeriğini yaz.\n\nFormat: <code>notadı Not içeriği buraya</code>\n\nÖrnek: <code>kurallar 1. Saygılı ol 2. Spam yapma 3. Reklam yasak</code>",
-    "act_sendnote"  : "📖 <b>Notu Gruba Gönder</b>\n\nGruba göndermek istediğin notun adını yaz.\n\nMevcut notlar: " + (", ".join(f"<code>#{k}</code>" for k in list(notes.keys())[:15]) or "Henüz not yok"),
-    "act_deletenote": "🗑️ <b>Not Sil</b>\n\nSilmek istediğin notun adını yaz.\n\nMevcut notlar: " + (", ".join(f"<code>#{k}</code>" for k in list(notes.keys())[:15]) or "Henüz not yok"),
-    "act_set_scheduled_text": (
-        "✏️ <b>Zamanlı Duyuru Metnini Düzenle</b>\n\n"
-        "Yeni duyuru metnini yaz. HTML formatı desteklenir.\n"
-        "<code>&lt;b&gt;kalın&lt;/b&gt;</code>, <code>&lt;i&gt;italik&lt;/i&gt;</code>\n\n"
-        "⚠️ Duyuru butonları (Duyuru Kanalı, Kurallar, SSS) otomatik eklenir, yazmana gerek yok.\n\n"
-        "Yeni metin:"
-    ),
-    "act_set_scheduled_time": (
-        "🕐 <b>Zamanlı Duyuru Saatini Değiştir</b>\n\n"
-        "Duyurunun gönderileceği saati <b>UTC</b> olarak gir.\n"
-        "Format: <code>SS:DD</code>\n\n"
-        "Örnekler:\n"
-        "• <code>06:00</code> → Türkiye 09:00 kış / 09:00 yaz\n"
-        "• <code>09:00</code> → Türkiye 12:00 yaz\n"
-        "• <code>15:00</code> → Türkiye 18:00 yaz\n\n"
-        "Saat (UTC olarak SS:DD):"
-    ),
-}
+def _action_prompts() -> dict:
+    """Dinamik oluştur — banned_words ve notes güncel olsun."""
+    valid_str = ", ".join(str(v) for v in VALID_SLOWMODE)
+    return {
+        "act_ban"       : "🔨 <b>Kullanıcı Banla</b>\n\nBanlamak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n(Opsiyonel: ID'nin ardından boşluk bırakıp neden yazabilirsin)\n\nÖrnek: <code>123456789 spam yapıyor</code>",
+        "act_unban"     : "✅ <b>Ban Kaldır</b>\n\nBanını kaldırmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_kick"      : "👢 <b>Kullanıcı At</b>\n\nAtmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_mute"      : "🔇 <b>Kullanıcı Sustur</b>\n\nSusturmak istediğin kullanıcının <b>ID ve dakika süresini</b> gönder.\n\nÖrnek: <code>123456789 30</code>\n(Süre girmezsen varsayılan 60 dakika uygulanır)",
+        "act_unmute"    : "🔊 <b>Sesi Aç</b>\n\nSusturmasını kaldırmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_warn"      : "⚠️ <b>Uyarı Ver</b>\n\nUyarmak istediğin kullanıcının <b>ID ve uyarı nedenini</b> gönder.\n⚡ 3 uyarıda otomatik ban!\n\nÖrnek: <code>123456789 kurallara uymadı</code>",
+        "act_unwarn"    : "🔄 <b>Uyarı Sıfırla</b>\n\nUyarılarını sıfırlamak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_warnings"  : "📊 <b>Uyarı Sorgula</b>\n\nUyarılarını sorgulamak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_promote"   : "⬆️ <b>Admin Yap</b>\n\nAdmin yapmak istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_demote"    : "⬇️ <b>Admin'den Al</b>\n\nYetkilerini iptal etmek istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_info"      : "👤 <b>Kullanıcı Bilgisi</b>\n\nBilgilerini görmek istediğin kullanıcının <b>Telegram ID'sini</b> gönder.\n\nÖrnek: <code>123456789</code>",
+        "act_pin"       : "📌 <b>Mesaj Sabitle</b>\n\nSabitlemek istediğin mesajın <b>mesaj ID'sini</b> gönder.\n\nÖrnek: <code>1234</code>",
+        "act_delete"    : "🗑️ <b>Mesaj Sil</b>\n\nSilmek istediğin mesajın <b>mesaj ID'sini</b> gönder.\n\nÖrnek: <code>1234</code>",
+        "act_purge_ask" : "🧹 <b>Son N Mesajı Sil</b>\n\nKaç mesaj silmek istediğini yaz.\n📌 Maksimum: 200 mesaj\n⚠️ Bu işlem geri alınamaz!\n\nÖrnek: <code>20</code>",
+        "act_purge_after": "⏩ <b>Şu Mesajdan Sonrasını Sil</b>\n\nGruba git, silmenin başlamasını istediğin mesajı <b>İlet (Forward)</b> yapıp bota gönder.\nYa da mesaj ID'sini rakam olarak yaz.\n\n⚠️ Bu işlem geri alınamaz!",
+        "act_broadcast" : "📣 <b>Gruba Duyuru Gönder</b>\n\nDuyuru metnini yaz. HTML etiketlerini kullanabilirsin.\n\nDuyuru metni:",
+        "act_poll"      : "📊 <b>Anket Oluştur</b>\n\nSoru ve seçenekleri <b>| (boru çizgisi)</b> ile ayırarak gönder.\n\nFormat: <code>Soru?|Seçenek1|Seçenek2|Seçenek3</code>",
+        "act_setwelcome": "👋 <b>Karşılama Mesajı Ayarla</b>\n\nYeni karşılama metnini yaz. HTML desteklenir.\n\n🔑 Değişkenler: <code>{name}</code> <code>{id}</code> <code>{group}</code>",
+        "act_slowmode"  : (
+            f"🐌 <b>Yavaş Mod Ayarla</b>\n\n"
+            f"⚠️ Telegram sadece şu değerleri kabul eder:\n"
+            f"<code>{valid_str}</code>\n\n"
+            f"Farklı bir değer girersen en yakın geçerli değer uygulanır.\n\n"
+            f"📌 Önerilen:\n"
+            f"• <code>0</code> → Kapat\n"
+            f"• <code>30</code> → 30 saniye\n"
+            f"• <code>60</code> → 1 dakika\n\n"
+            f"Saniye cinsinden değer:"
+        ),
+        "act_autodelete": "⏱️ <b>Otomatik Mesaj Silme</b>\n\nKaç saniye sonra mesajlar silinsin? <code>0</code> ile kapatabilirsin.\n\nÖrnek: <code>3600</code> (1 saat)",
+        "act_addban"    : "🚫 <b>Yasaklı Kelime Ekle</b>\n\nFiltrelemek istediğin kelimeyi yaz.",
+        "act_removeban" : "✅ <b>Yasaklı Kelime Kaldır</b>\n\nListeden kaldırmak istediğin kelimeyi yaz.\n\nMevcut: " + (", ".join(f"<code>{w}</code>" for w in banned_words) or "Liste boş"),
+        "act_savenote"  : "💾 <b>Not Kaydet</b>\n\nÖnce not adını, sonra bir boşluk bırakıp içeriğini yaz.\n\nFormat: <code>notadı Not içeriği buraya</code>",
+        "act_sendnote"  : "📖 <b>Notu Gruba Gönder</b>\n\nGruba göndermek istediğin notun adını yaz.\n\nMevcut notlar: " + (", ".join(f"<code>#{k}</code>" for k in list(notes.keys())[:15]) or "Henüz not yok"),
+        "act_deletenote": "🗑️ <b>Not Sil</b>\n\nSilmek istediğin notun adını yaz.\n\nMevcut notlar: " + (", ".join(f"<code>#{k}</code>" for k in list(notes.keys())[:15]) or "Henüz not yok"),
+        "act_set_scheduled_text": (
+            "✏️ <b>Zamanlı Duyuru Metnini Düzenle</b>\n\n"
+            "Yeni duyuru metnini yaz. HTML desteklenir.\n\n"
+            "⚠️ Duyuru butonları otomatik eklenir.\n\nYeni metin:"
+        ),
+        "act_set_scheduled_time": (
+            "🕐 <b>Zamanlı Duyuru Saatini Değiştir</b>\n\n"
+            "UTC saat gir. Format: <code>SS:DD</code>\n\n"
+            "• <code>06:00</code> → Türkiye 09:00\n"
+            "• <code>09:00</code> → Türkiye 12:00\n\n"
+            "Saat (UTC):"
+        ),
+    }
 
 # ──────────────────────────────────────────────────────────────
 # /start  /help
@@ -532,14 +561,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        # Sadece admin kullanabilir, diğerleri sessizce görmezden gel
         if not is_admin(user.id):
             try:
-                await update.message.delete()  # komutu sil ki kalabalık olmasın
+                await update.message.delete()
             except TelegramError:
                 pass
             return
-        # Admin grupta /start yazdıysa DM'e yönlendir
         m = await update.message.reply_text(
             "🤖 Yönetim paneli için DM'e geç 👉 @me",
             parse_mode=ParseMode.HTML,
@@ -575,7 +602,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await cmd_start(update, ctx)
 
 # ──────────────────────────────────────────────────────────────
-# CALLBACK HANDLER — Ana yönlendirici
+# CALLBACK HANDLER
 # ──────────────────────────────────────────────────────────────
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q    = update.callback_query
@@ -625,7 +652,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "menu_broadcast":
         pending[uid] = {"action": "act_broadcast"}
         await q.message.edit_text(
-            ACTION_PROMPTS["act_broadcast"],
+            _action_prompts()["act_broadcast"],
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ İptal", callback_data="menu_main")]]),
         )
@@ -638,6 +665,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "invite_reset":
         invite_tracker.clear()
+        save_data()
         await q.answer("✅ Davet tablosu sıfırlandı!", show_alert=True)
         txt, kb = invites_menu()
         await q.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -673,6 +701,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "scheduled_toggle":
         global scheduled_msg_on
         scheduled_msg_on = not scheduled_msg_on
+        save_data()
         status = "▶️ Başlatıldı" if scheduled_msg_on else "⏸️ Durduruldu"
         await q.answer(f"Zamanlı duyuru {status}", show_alert=True)
         txt, kb = scheduled_menu()
@@ -683,7 +712,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _send_scheduled_msg(ctx)
         await q.answer("✅ Duyuru şimdi gönderildi!", show_alert=True)
         return
-
 
     if data == "act_unpin":
         await _exec_unpin(q.message, ctx)
@@ -700,9 +728,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "act_toggle_flood":
         global antiflood_on
         antiflood_on = not antiflood_on
+        save_data()
         status = "✅ Aktif" if antiflood_on else "❌ Pasif"
         await q.answer(f"Anti-Flood şimdi: {status}", show_alert=True)
-        # Menüyü yenile
         txt, kb = settings_menu()
         await q.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
@@ -711,8 +739,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             link = await ctx.bot.export_chat_invite_link(GROUP_ID)
             await q.message.reply_text(
-                f"🔗 <b>Yeni Davet Linki Oluşturuldu</b>\n\n"
-                f"Eski link artık geçersiz.\nYeni link:\n{link}",
+                f"🔗 <b>Yeni Davet Linki Oluşturuldu</b>\n\nEski link artık geçersiz.\nYeni link:\n{link}",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
@@ -776,8 +803,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "⚠️ <b>UYARI — Toplu Mesaj Silme</b>\n\n"
             "Grubun son <b>100 mesajını</b> silmek üzeresin.\n\n"
             "• Bu işlem <b>geri alınamaz!</b>\n"
-            "• Bot her mesajı tek tek siler, bu birkaç saniye sürebilir.\n"
-            "• İşlem sırasında grupta mesaj atmana gerek yok.\n\n"
+            "• İşlem birkaç saniye sürebilir.\n\n"
             "Devam etmek istiyor musun?",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
@@ -785,9 +811,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "clearall_confirm":
-        if not is_admin(uid):
-            await q.answer("⛔ Yetkin yok.", show_alert=True)
-            return
         chat_id = q.message.chat.id
         await q.message.edit_text("🗑️ Silme işlemi başladı, lütfen bekleyin...")
         try:
@@ -800,9 +823,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         deleted = await _bulk_delete(ctx, chat_id, last_id - 1, last_id - 100)
         stats["deleted_messages"] += deleted
         result_msg = await ctx.bot.send_message(
-            chat_id,
-            f"✅ <b>{deleted}</b> mesaj silindi.",
-            parse_mode=ParseMode.HTML,
+            chat_id, f"✅ <b>{deleted}</b> mesaj silindi.", parse_mode=ParseMode.HTML,
         )
         asyncio.create_task(auto_delete(ctx, chat_id, result_msg.message_id, 5))
         try:
@@ -812,9 +833,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("purge_confirm:"):
-        if not is_admin(uid):
-            await q.answer("⛔ Yetkin yok.", show_alert=True)
-            return
         n       = int(data.split(":")[1])
         chat_id = q.message.chat.id
         await q.message.edit_text(f"🧹 Son <b>{n}</b> mesaj siliniyor...", parse_mode=ParseMode.HTML)
@@ -828,9 +846,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         deleted = await _bulk_delete(ctx, chat_id, last_id - 1, last_id - n)
         stats["deleted_messages"] += deleted
         result_msg = await ctx.bot.send_message(
-            chat_id,
-            f"✅ <b>{deleted}</b> mesaj silindi.",
-            parse_mode=ParseMode.HTML,
+            chat_id, f"✅ <b>{deleted}</b> mesaj silindi.", parse_mode=ParseMode.HTML,
         )
         asyncio.create_task(auto_delete(ctx, chat_id, result_msg.message_id, 5))
         try:
@@ -839,16 +855,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # Purge after (şu mesajdan sonrasını sil) onay
     if data.startswith("purge_after_confirm:"):
-        if not is_admin(uid): 
-            await q.answer("⛔ Yetkin yok.", show_alert=True)
-            return
         from_id  = int(data.split(":")[1])
-        chat_id  = q.message.chat.id   # DM değil, mesajın olduğu chat
+        chat_id  = q.message.chat.id
         await q.message.edit_text(
-            f"⏩ Siliniyor... (mesaj ID {from_id}'den itibaren)",
-            parse_mode=ParseMode.HTML
+            f"⏩ Siliniyor... (mesaj ID {from_id}'den itibaren)", parse_mode=ParseMode.HTML
         )
         try:
             sentinel = await ctx.bot.send_message(chat_id, "🧹")
@@ -859,11 +870,8 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         deleted = await _bulk_delete(ctx, chat_id, last_id - 1, from_id)
         stats["deleted_messages"] += deleted
-        # Sonuç mesajını da kısa süre sonra sil
         result_msg = await ctx.bot.send_message(
-            chat_id,
-            f"✅ <b>{deleted}</b> mesaj silindi.",
-            parse_mode=ParseMode.HTML,
+            chat_id, f"✅ <b>{deleted}</b> mesaj silindi.", parse_mode=ParseMode.HTML,
         )
         asyncio.create_task(auto_delete(ctx, chat_id, result_msg.message_id, 5))
         try:
@@ -873,14 +881,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "purgefrom_cancel":
-        await q.message.delete()
+        try:
+            await q.message.delete()
+        except TelegramError:
+            pass
         return
 
-    # ── /select aralık silme onayı ───────────────────────────
     if data.startswith("select_confirm:"):
-        if not is_admin(uid):
-            await q.answer("⛔ Yetkin yok.", show_alert=True)
-            return
         _, start_id, end_id = data.split(":")
         start_id = int(start_id)
         end_id   = int(end_id)
@@ -892,9 +899,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         deleted = await _bulk_delete(ctx, chat_id, start_id, end_id)
         stats["deleted_messages"] += deleted
         result_msg = await ctx.bot.send_message(
-            chat_id,
-            f"✅ Seçili aralıktan <b>{deleted}</b> mesaj silindi.",
-            parse_mode=ParseMode.HTML,
+            chat_id, f"✅ Seçili aralıktan <b>{deleted}</b> mesaj silindi.", parse_mode=ParseMode.HTML,
         )
         asyncio.create_task(auto_delete(ctx, chat_id, result_msg.message_id, 5))
         try:
@@ -904,9 +909,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "select_cancel":
-        await q.message.delete()
+        try:
+            await q.message.delete()
+        except TelegramError:
+            pass
         return
-
 
     if data == "rules":
         await q.message.reply_text(
@@ -921,10 +928,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Girdi gerektiren işlemler → pending'e ekle ──────────
-    if data in ACTION_PROMPTS:
+    prompts = _action_prompts()
+    if data in prompts:
         pending[uid] = {"action": data}
         await q.message.edit_text(
-            ACTION_PROMPTS[data],
+            prompts[data],
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ İptal", callback_data="menu_main")]]),
         )
@@ -940,14 +948,14 @@ async def handle_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(uid):
         return
 
-    # > ile gruba mesaj ilet (forward mesajlarda çalışmasın)
+    # > ile gruba mesaj ilet
     if text.startswith(">") and not update.message.forward_date and not getattr(update.message, "forward_origin", None):
-        msg = text[1:].strip()
-        if msg:
+        msg_text = text[1:].strip()
+        if msg_text:
             try:
                 await ctx.bot.send_message(
                     GROUP_ID,
-                    f"📢 <b>Yönetici Mesajı</b>\n━━━━━━━━━━━━\n{msg}",
+                    f"📢 <b>Yönetici Mesajı</b>\n━━━━━━━━━━━━\n{msg_text}",
                     parse_mode=ParseMode.HTML,
                 )
                 await update.message.reply_text("✅ Mesaj gruba iletildi.")
@@ -972,12 +980,8 @@ async def handle_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         fwd_err    = None
         m = update.message
 
-        # Yeni API: forward_origin (python-telegram-bot 20+)
         origin = getattr(m, "forward_origin", None)
         if origin:
-            otype = getattr(origin, "type", None) or type(origin).__name__
-
-            # Kanal veya gruptan iletilmiş → message_id var
             msg_id  = getattr(origin, "message_id", None)
             chat    = getattr(origin, "chat", None)
             chat_id = getattr(chat, "id", None) if chat else None
@@ -988,14 +992,13 @@ async def handle_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 else:
                     fwd_msg_id = msg_id
             else:
-                fwd_err = "⚠️ Bu mesaj bir <b>kullanıcıdan</b> iletilmiş, gruba ait mesaj ID'si alınamıyor.\nLütfen <b>grup/kanal mesajını</b> iletin."
+                fwd_err = "⚠️ Mesaj ID'si alınamadı.\nLütfen grup mesajını iletin veya mesaj ID'sini yazın."
 
-        # Eski API fallback: forward_from_chat
         elif getattr(m, "forward_from_chat", None) and getattr(m, "forward_from_message_id", None):
             if m.forward_from_chat.id == GROUP_ID:
                 fwd_msg_id = m.forward_from_message_id
             else:
-                fwd_err = f"⚠️ Bu mesaj farklı bir gruptan iletilmiş.\nLütfen hedef grubunuzdaki bir mesajı iletin."
+                fwd_err = "⚠️ Bu mesaj farklı bir gruptan iletilmiş.\nLütfen hedef grubunuzdaki bir mesajı iletin."
 
         elif getattr(m, "forward_date", None):
             fwd_err = "⚠️ Mesaj ID'si alınamadı.\nLütfen grubunuzdaki bir mesajı bota iletin."
@@ -1005,29 +1008,30 @@ async def handle_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _process_action(update, ctx, action, str(fwd_msg_id))
             return
         elif fwd_err:
+            # pending korunuyor — kullanıcı tekrar deneyebilir
             await m.reply_text(fwd_err, parse_mode=ParseMode.HTML)
             return
-        elif not m.text or not m.text.strip().isdigit():
-            # Ne forward ne de sayı — pending'i koruyup tekrar sor
+        elif m.text and m.text.strip().isdigit():
+            # Düz sayı yazıldıysa normal akışa devam
+            pass
+        else:
             await m.reply_text(
                 "⚠️ Mesaj algılanamadı.\n\n"
                 "Grupta bir mesajı <b>İlet (Forward)</b> yapıp bota gönderin,\n"
                 "ya da mesaj ID'sini rakam olarak yazın.",
                 parse_mode=ParseMode.HTML,
             )
-            return
-        # Düz sayı olarak yazıldıysa normal akışa devam
+            return  # pending korunuyor
 
     del pending[uid]
-
-    # ── İşlemleri yürüt ─────────────────────────────────────
     await _process_action(update, ctx, action, text)
 
+# ──────────────────────────────────────────────────────────────
+# PROCESS ACTION
+# ──────────────────────────────────────────────────────────────
 async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action: str, text: str):
-    """Kullanıcıdan gelen girdiyi işle ve ilgili bot işlemini yürüt."""
     msg = update.message
 
-    # Kullanıcı ID çözümleyici
     async def get_uid_and_rest(default_reason="Belirtilmedi"):
         parts = text.strip().split(maxsplit=1)
         if not parts or not parts[0].isdigit():
@@ -1060,9 +1064,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
         try:
             await ctx.bot.unban_chat_member(GROUP_ID, uid)
             await msg.reply_text(
-                f"✅ <b>Ban Kaldırıldı</b>\n\n"
-                f"🆔 ID <code>{uid}</code> numaralı kullanıcının yasağı kaldırıldı. "
-                f"Artık gruba tekrar katılabilir.",
+                f"✅ <b>Ban Kaldırıldı</b>\n\n🆔 ID <code>{uid}</code> artık gruba tekrar katılabilir.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
@@ -1078,9 +1080,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             await ctx.bot.unban_chat_member(GROUP_ID, uid)
             await msg.reply_text(
                 f"👢 <b>Kullanıcı Atıldı</b>\n━━━━━━━━━━━━━━━━\n"
-                f"👤 Kullanıcı: {fmt(member.user)}\n"
-                f"🆔 ID: <code>{uid}</code>\n\n"
-                f"ℹ️ Kullanıcı davet linki ile tekrar girebilir.",
+                f"👤 {fmt(member.user)}\nℹ️ Davet linki ile tekrar girebilir.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
@@ -1105,8 +1105,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             muted_users[uid] = until
             await msg.reply_text(
                 f"🔇 <b>Kullanıcı Susturuldu</b>\n━━━━━━━━━━━━━━━━\n"
-                f"👤 Kullanıcı: {fmt(member.user)}\n"
-                f"🆔 ID: <code>{uid}</code>\n"
+                f"👤 {fmt(member.user)}\n"
                 f"⏱️ Süre: {minutes} dakika\n"
                 f"🕐 Bitiş: {until.strftime('%H:%M, %d.%m.%Y')}",
                 parse_mode=ParseMode.HTML,
@@ -1129,8 +1128,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             )
             muted_users.pop(uid, None)
             await msg.reply_text(
-                f"🔊 <b>Susturma Kaldırıldı</b>\n\n"
-                f"👤 {fmt(member.user)} artık mesaj gönderebilir.",
+                f"🔊 <b>Susturma Kaldırıldı</b>\n\n👤 {fmt(member.user)} artık mesaj gönderebilir.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
@@ -1149,19 +1147,20 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
                 await ctx.bot.ban_chat_member(GROUP_ID, uid)
                 stats["banned_users"] += 1
                 warnings_db.pop(uid, None)
+                save_data()
                 await msg.reply_text(
                     f"🔨 <b>Otomatik Ban!</b>\n━━━━━━━━━━━━━━━━\n"
-                    f"👤 {fmt(member.user)} 3 uyarıya ulaştı ve <b>otomatik olarak banlandı!</b>\n"
-                    f"📝 Son neden: {reason}",
+                    f"👤 {fmt(member.user)} 3 uyarıya ulaştı ve <b>otomatik olarak banlandı!</b>",
                     parse_mode=ParseMode.HTML,
                 )
             else:
+                save_data()
                 await msg.reply_text(
                     f"⚠️ <b>Uyarı Verildi</b>\n━━━━━━━━━━━━━━━━\n"
-                    f"👤 Kullanıcı: {fmt(member.user)}\n"
-                    f"📊 Uyarı sayısı: <b>{count}/3</b>\n"
+                    f"👤 {fmt(member.user)}\n"
+                    f"📊 Uyarı: <b>{count}/3</b>\n"
                     f"📝 Neden: {reason}\n\n"
-                    f"{'⚡ Bir daha uyarılırsa otomatik ban!' if count == 2 else f'Toplam {3 - count} uyarı hakkı kaldı.'}",
+                    f"{'⚡ Bir daha uyarılırsa otomatik ban!' if count == 2 else f'{3 - count} uyarı hakkı kaldı.'}",
                     parse_mode=ParseMode.HTML,
                 )
         except TelegramError as e:
@@ -1172,9 +1171,9 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
         uid, _ = await get_uid_and_rest()
         if uid is None: return
         prev = warnings_db.pop(uid, 0)
+        save_data()
         await msg.reply_text(
-            f"🔄 <b>Uyarılar Sıfırlandı</b>\n\n"
-            f"🆔 ID <code>{uid}</code> numaralı kullanıcının {prev} uyarısı temizlendi.",
+            f"🔄 <b>Uyarılar Sıfırlandı</b>\n\n🆔 ID <code>{uid}</code> — {prev} uyarı temizlendi.",
             parse_mode=ParseMode.HTML,
         )
 
@@ -1190,7 +1189,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             uname  = f"ID <code>{uid}</code>"
         await msg.reply_text(
             f"📊 <b>Uyarı Durumu</b>\n━━━━━━━━━━━━━━━━\n"
-            f"👤 Kullanıcı: {uname}\n"
+            f"👤 {uname}\n"
             f"⚠️ Uyarı: <b>{count}/3</b>\n\n"
             f"{'🔴 Bir uyarı daha alırsa otomatik ban!' if count == 2 else '🟢 Sorunsuz.' if count == 0 else '🟡 Dikkat gerekiyor.'}",
             parse_mode=ParseMode.HTML,
@@ -1209,8 +1208,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             )
             await msg.reply_text(
                 f"⬆️ <b>Admin Yapıldı</b>\n━━━━━━━━━━━━━━━━\n"
-                f"👤 {fmt(member.user)} artık grup yöneticisi.\n\n"
-                f"✅ Verilen yetkiler: Mesaj silme, Üye kısıtlama, Mesaj sabitleme, Grubu yönetme",
+                f"👤 {fmt(member.user)} artık grup yöneticisi.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
@@ -1228,8 +1226,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
                 can_pin_messages=False, can_manage_chat=False,
             )
             await msg.reply_text(
-                f"⬇️ <b>Yetkiler Alındı</b>\n\n"
-                f"👤 {fmt(member.user)} artık normal üye statüsünde.",
+                f"⬇️ <b>Yetkiler Alındı</b>\n\n👤 {fmt(member.user)} artık normal üye.",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
@@ -1247,13 +1244,12 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
                 "member": "👤 Üye", "restricted": "⛔ Kısıtlı",
                 "left": "🚪 Ayrıldı", "kicked": "🔨 Banlı",
             }
-            status = status_map.get(member.status, member.status)
             await msg.reply_text(
                 f"👤 <b>Kullanıcı Profili</b>\n━━━━━━━━━━━━━━━━\n"
                 f"👤 Ad: {fmt(u)}\n"
                 f"🆔 ID: <code>{u.id}</code>\n"
                 f"📛 Kullanıcı adı: @{u.username or 'Yok'}\n"
-                f"📊 Grup rolü: {status}\n"
+                f"📊 Grup rolü: {status_map.get(member.status, member.status)}\n"
                 f"⚠️ Uyarılar: {warnings_db.get(u.id, 0)}/3\n"
                 f"🤖 Bot hesabı: {'Evet' if u.is_bot else 'Hayır'}",
                 parse_mode=ParseMode.HTML,
@@ -1295,23 +1291,15 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             InlineKeyboardButton("❌ İptal", callback_data="menu_msgs"),
         ]])
         await msg.reply_text(
-            f"⚠️ <b>Onay Gerekiyor</b>\n\n"
-            f"Grubun son <b>{n} mesajını</b> silmek üzeresin.\n"
-            f"Bu işlem <b>geri alınamaz!</b>\n\nDevam etmek istiyor musun?",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb,
+            f"⚠️ <b>Onay Gerekiyor</b>\n\nSon <b>{n} mesajı</b> silmek üzeresin.\nBu işlem geri alınamaz!\n\nDevam?",
+            parse_mode=ParseMode.HTML, reply_markup=kb,
         )
 
     # ── PURGE AFTER ─────────────────────────────────────────
     elif action == "act_purge_after":
         text_clean = text.strip()
-        # Forward edilmiş mesaj ID veya düz sayı kabul et
         if not text_clean.isdigit():
-            await msg.reply_text(
-                "❌ Geçerli bir <b>mesaj ID'si</b> gir.\n"
-                "Örnek: <code>12345</code>",
-                parse_mode=ParseMode.HTML,
-            )
+            await msg.reply_text("❌ Geçerli bir <b>mesaj ID'si</b> gir.", parse_mode=ParseMode.HTML)
             return
         from_id = int(text_clean)
         kb = InlineKeyboardMarkup([[
@@ -1322,12 +1310,8 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             InlineKeyboardButton("❌ İptal", callback_data="menu_msgs"),
         ]])
         await msg.reply_text(
-            f"⚠️ <b>Onay Gerekiyor</b>\n\n"
-            f"Mesaj <code>{from_id}</code>'den başlayarak en son mesaja kadar\n"
-            f"<b>tüm mesajlar silinecek.</b>\n\n"
-            f"Bu işlem <b>geri alınamaz!</b>\n\nDevam etmek istiyor musun?",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb,
+            f"⚠️ Mesaj <code>{from_id}</code>'den en sona kadar <b>tüm mesajlar</b> silinecek.\nGeri alınamaz!",
+            parse_mode=ParseMode.HTML, reply_markup=kb,
         )
 
     # ── BROADCAST ───────────────────────────────────────────
@@ -1353,9 +1337,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
         try:
             await ctx.bot.send_poll(GROUP_ID, question, options, is_anonymous=False)
             await msg.reply_text(
-                f"✅ <b>Anket Oluşturuldu!</b>\n\n"
-                f"❓ Soru: {question}\n"
-                f"📊 Seçenek sayısı: {len(options)}",
+                f"✅ <b>Anket Oluşturuldu!</b>\n\n❓ {question}\n📊 {len(options)} seçenek",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
@@ -1365,9 +1347,9 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
     elif action == "act_setwelcome":
         global welcome_msg
         welcome_msg = text
+        save_data()
         await msg.reply_text(
-            f"✅ <b>Karşılama Mesajı Güncellendi</b>\n\n"
-            f"Yeni mesaj:\n<i>{welcome_msg}</i>",
+            f"✅ <b>Karşılama Mesajı Güncellendi</b>\n\nYeni mesaj:\n<i>{welcome_msg[:200]}</i>",
             parse_mode=ParseMode.HTML,
         )
 
@@ -1375,9 +1357,9 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
     elif action == "act_set_scheduled_text":
         global scheduled_msg_text
         scheduled_msg_text = text
+        save_data()
         await msg.reply_text(
-            f"✅ <b>Zamanlı Duyuru Metni Güncellendi</b>\n\n"
-            f"Yeni metin:\n<i>{scheduled_msg_text[:300]}</i>",
+            f"✅ <b>Zamanlı Duyuru Metni Güncellendi</b>\n\n<i>{scheduled_msg_text[:300]}</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏰ Duyuru Ayarlarına Dön", callback_data="menu_scheduled")]]),
         )
@@ -1396,47 +1378,53 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             return
         scheduled_msg_hour = h
         scheduled_msg_min  = mi
-        # Scheduler'ı yeniden ayarla
+        save_data()
         _reschedule(ctx)
         await msg.reply_text(
             f"✅ <b>Zamanlı Duyuru Saati Güncellendi</b>\n\n"
-            f"🕐 Yeni saat (UTC): <b>{h:02d}:{mi:02d}</b>\n"
+            f"🕐 UTC: <b>{h:02d}:{mi:02d}</b>\n"
             f"🇹🇷 Türkiye ≈ <b>{(h+3)%24:02d}:{mi:02d}</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏰ Duyuru Ayarlarına Dön", callback_data="menu_scheduled")]]),
         )
 
-
+    # ── SLOWMODE ─────────────────────────────────────────────
     elif action == "act_slowmode":
         global slowmode_sec
         if not text.strip().isdigit():
-            await msg.reply_text("❌ Geçerli bir <b>saniye değeri</b> gir.", parse_mode=ParseMode.HTML)
-            return
-        slowmode_sec = int(text.strip())
-        try:
-            await ctx.bot.set_chat_slow_mode_delay(GROUP_ID, slowmode_sec)
-            status = f"{slowmode_sec} saniye" if slowmode_sec else "Kapalı"
             await msg.reply_text(
-                f"🐌 <b>Yavaş Mod Güncellendi</b>\n\n"
-                f"Yeni değer: <b>{status}</b>\n"
-                f"{'Artık üyeler arasına ' + str(slowmode_sec) + ' saniye bekleme eklenecek.' if slowmode_sec else 'Yavaş mod devre dışı bırakıldı.'}",
+                f"❌ Geçerli bir saniye değeri gir.\n\n"
+                f"Geçerli değerler: <code>{', '.join(str(v) for v in VALID_SLOWMODE)}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        requested = int(text.strip())
+        # En yakın geçerli değere yuvarla
+        actual = nearest_slowmode(requested)
+        try:
+            await ctx.bot.set_chat_slow_mode_delay(GROUP_ID, actual)
+            slowmode_sec = actual
+            save_data()
+            status = f"{actual} saniye" if actual else "Kapalı"
+            note = f"\n\n💡 <i>{requested}sn girildi, en yakın geçerli değer {actual}sn uygulandı.</i>" if actual != requested else ""
+            await msg.reply_text(
+                f"🐌 <b>Yavaş Mod Güncellendi</b>\n\nYeni değer: <b>{status}</b>{note}",
                 parse_mode=ParseMode.HTML,
             )
         except TelegramError as e:
-            await msg.reply_text(f"❌ Hata: {e}")
+            await msg.reply_text(f"❌ Telegram hatası: {e}", parse_mode=ParseMode.HTML)
 
     # ── AUTODELETE ──────────────────────────────────────────
     elif action == "act_autodelete":
         global auto_delete_sec
         if not text.strip().isdigit():
-            await msg.reply_text("❌ Geçerli bir <b>saniye değeri</b> gir.", parse_mode=ParseMode.HTML)
+            await msg.reply_text("❌ Geçerli bir saniye değeri gir.", parse_mode=ParseMode.HTML)
             return
         auto_delete_sec = int(text.strip())
+        save_data()
         status = f"{auto_delete_sec} saniye sonra" if auto_delete_sec else "Kapalı"
         await msg.reply_text(
-            f"⏱️ <b>Otomatik Silme Güncellendi</b>\n\n"
-            f"Yeni değer: <b>{status}</b>\n"
-            f"{'Gruba gelen her mesaj ' + str(auto_delete_sec) + ' saniye sonra otomatik silinecek.' if auto_delete_sec else 'Otomatik silme devre dışı bırakıldı.'}",
+            f"⏱️ <b>Otomatik Silme Güncellendi</b>\n\nYeni değer: <b>{status}</b>",
             parse_mode=ParseMode.HTML,
         )
 
@@ -1448,10 +1436,9 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             return
         if word not in banned_words:
             banned_words.append(word)
+            save_data()
             await msg.reply_text(
-                f"✅ <b>Filtre Eklendi</b>\n\n"
-                f"🚫 <code>{word}</code> artık yasaklı kelimeler listesinde.\n"
-                f"Bu kelimeyi içeren her mesaj otomatik silinecek.\n\n"
+                f"✅ <b>Filtre Eklendi</b>\n\n🚫 <code>{word}</code> yasaklı kelimeler listesinde.\n"
                 f"📊 Toplam aktif filtre: {len(banned_words)}",
                 parse_mode=ParseMode.HTML,
             )
@@ -1463,10 +1450,9 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
         word = text.strip().lower()
         if word in banned_words:
             banned_words.remove(word)
+            save_data()
             await msg.reply_text(
-                f"✅ <b>Filtre Kaldırıldı</b>\n\n"
-                f"<code>{word}</code> artık filtrelenmeyecek.\n"
-                f"Kalan filtre sayısı: {len(banned_words)}",
+                f"✅ <code>{word}</code> kaldırıldı. Kalan: {len(banned_words)}",
                 parse_mode=ParseMode.HTML,
             )
         else:
@@ -1480,11 +1466,9 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
             return
         name, content = parts[0].lower(), parts[1]
         notes[name] = content
+        save_data()
         await msg.reply_text(
-            f"✅ <b>Not Kaydedildi</b>\n━━━━━━━━━━━━━━━━\n"
-            f"📝 Ad: <code>#{name}</code>\n"
-            f"📄 İçerik: <i>{content[:100]}{'...' if len(content) > 100 else ''}</i>\n\n"
-            f"💡 Grupta <code>#{name}</code> yazarak gösterebilirsin.",
+            f"✅ <b>Not Kaydedildi</b>\n\n📝 <code>#{name}</code>\n<i>{content[:100]}...</i>",
             parse_mode=ParseMode.HTML,
         )
 
@@ -1492,7 +1476,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
     elif action == "act_sendnote":
         name = text.strip().lower().lstrip("#")
         if name not in notes:
-            await msg.reply_text(f"❌ <code>#{name}</code> adında bir not bulunamadı.", parse_mode=ParseMode.HTML)
+            await msg.reply_text(f"❌ <code>#{name}</code> adında not bulunamadı.", parse_mode=ParseMode.HTML)
             return
         try:
             await ctx.bot.send_message(
@@ -1500,7 +1484,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
                 f"📝 <b>{name}</b>\n━━━━━━━━━━━━━━━━\n{notes[name]}",
                 parse_mode=ParseMode.HTML,
             )
-            await msg.reply_text(f"✅ <code>#{name}</code> notu gruba gönderildi.", parse_mode=ParseMode.HTML)
+            await msg.reply_text(f"✅ <code>#{name}</code> gruba gönderildi.", parse_mode=ParseMode.HTML)
         except TelegramError as e:
             await msg.reply_text(f"❌ Hata: {e}")
 
@@ -1509,6 +1493,7 @@ async def _process_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action
         name = text.strip().lower().lstrip("#")
         if name in notes:
             del notes[name]
+            save_data()
             await msg.reply_text(f"✅ <code>#{name}</code> notu silindi.", parse_mode=ParseMode.HTML)
         else:
             await msg.reply_text(f"❌ <code>#{name}</code> adında not bulunamadı.", parse_mode=ParseMode.HTML)
@@ -1529,9 +1514,9 @@ async def _exec_lock(msg, ctx, lock: bool):
         if lock:
             await ctx.bot.set_chat_permissions(GROUP_ID, ChatPermissions(can_send_messages=False))
             group_locked = True
+            save_data()
             await msg.reply_text(
-                "🔒 <b>Grup Kilitlendi</b>\n\nArtık sadece yöneticiler mesaj gönderebilir. "
-                "Açmak için Grup Ayarları → Grubu Aç butonunu kullan.",
+                "🔒 <b>Grup Kilitlendi</b>\n\nSadece yöneticiler mesaj gönderebilir.",
                 parse_mode=ParseMode.HTML,
             )
         else:
@@ -1542,10 +1527,8 @@ async def _exec_lock(msg, ctx, lock: bool):
                 ),
             )
             group_locked = False
-            await msg.reply_text(
-                "🔓 <b>Grup Açıldı</b>\n\nTüm üyeler tekrar mesaj gönderebilir.",
-                parse_mode=ParseMode.HTML,
-            )
+            save_data()
+            await msg.reply_text("🔓 <b>Grup Açıldı</b>\n\nTüm üyeler tekrar mesaj gönderebilir.", parse_mode=ParseMode.HTML)
     except TelegramError as e:
         await msg.reply_text(f"❌ Hata: {e}")
 
@@ -1560,7 +1543,7 @@ async def _exec_groupinfo(msg, ctx):
             f"👥 Üye sayısı: <b>{count}</b>\n"
             f"📝 Açıklama: {chat.description or 'Yok'}\n"
             f"🔗 Davet linki: {chat.invite_link or 'Yok'}\n"
-            f"🔒 Kilit durumu: {'Kilitli 🔒' if group_locked else 'Açık 🔓'}\n"
+            f"🔒 Kilit: {'Kilitli 🔒' if group_locked else 'Açık 🔓'}\n"
             f"🐌 Yavaş mod: {slowmode_sec}sn\n"
             f"⏱️ Otomatik silme: {auto_delete_sec}sn\n"
             f"🌊 Anti-flood: {'Aktif ✅' if antiflood_on else 'Pasif ❌'}",
@@ -1574,8 +1557,8 @@ async def _exec_stats(msg):
         f"📈 <b>Bot Oturum İstatistikleri</b>\n━━━━━━━━━━━━━━━━\n"
         f"💬 İşlenen mesaj: <b>{stats['total_messages']}</b>\n"
         f"🗑️ Silinen mesaj: <b>{stats['deleted_messages']}</b>\n"
-        f"🔨 Banlanan kullanıcı: <b>{stats['banned_users']}</b>\n"
-        f"⚠️ Uyarılan kullanıcı: <b>{stats['warned_users']}</b>\n"
+        f"🔨 Banlanan: <b>{stats['banned_users']}</b>\n"
+        f"⚠️ Uyarılan: <b>{stats['warned_users']}</b>\n"
         f"🔇 Şu an susturulmuş: <b>{len(muted_users)}</b>\n"
         f"🚫 Aktif filtre: <b>{len(banned_words)}</b>\n"
         f"📝 Kayıtlı not: <b>{len(notes)}</b>\n\n"
@@ -1588,27 +1571,21 @@ async def _exec_stats(msg):
     )
 
 # ──────────────────────────────────────────────────────────────
-# GRUP KOMUTLARI (direkt yazılanlar)
+# GRUP KOMUTLARI
 # ──────────────────────────────────────────────────────────────
 async def _group_cmd(update, ctx, action):
-    """Grup içi komutları pending'e atarak DM akışını kullan."""
     if not is_admin(update.effective_user.id): return
-    uid = update.effective_user.id
-
-    # Argüman varsa direkt işle, yoksa DM'e yönlendir
     if ctx.args:
         text = " ".join(ctx.args)
-        # reply varsa ID ekle
-        if update.message.reply_to_message:
+        if update.message.reply_to_message and update.message.reply_to_message.from_user:
             text = f"{update.message.reply_to_message.from_user.id} {text}"
         await _process_action(update, ctx, f"act_{action}", text)
-    elif update.message.reply_to_message:
+    elif update.message.reply_to_message and update.message.reply_to_message.from_user:
         text = str(update.message.reply_to_message.from_user.id)
         await _process_action(update, ctx, f"act_{action}", text)
     else:
         await update.message.reply_text(
-            f"ℹ️ Kullanım: /{action} [ID veya yanıtla]\n"
-            f"💡 Ya da DM'den /start → görsel panel",
+            f"ℹ️ Kullanım: /{action} [ID veya yanıtla]\n💡 Ya da DM'den /start → görsel panel",
         )
 
 async def cmd_ban    (u, c): await _group_cmd(u, c, "ban")
@@ -1669,10 +1646,8 @@ async def cmd_purge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 5))
 
 async def cmd_purgefrom(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Grupta bir mesajı reply'layıp /purgefrom → o mesajdan itibaren sil."""
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
-
     reply = update.message.reply_to_message
     if not reply:
         m = await update.message.reply_text(
@@ -1682,108 +1657,69 @@ async def cmd_purgefrom(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 5))
         asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 8))
         return
-
     from_id = reply.message_id
-
-    # Onay mesajını GRUPTA gönder
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Evet, sil!", callback_data=f"purge_after_confirm:{from_id}"),
         InlineKeyboardButton("❌ İptal",      callback_data="purgefrom_cancel"),
     ]])
     await update.message.reply_text(
-        f"⚠️ Mesaj <code>{from_id}</code>'den en sona kadar <b>tüm mesajlar</b> silinecek.\n"
-        f"Bu işlem geri alınamaz!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb,
+        f"⚠️ Mesaj <code>{from_id}</code>'den en sona kadar silinecek.\nGeri alınamaz!",
+        parse_mode=ParseMode.HTML, reply_markup=kb,
     )
-    # Komutu hemen sil
     asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 1))
 
 async def cmd_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Bir mesajı yanıtlayarak /select → başlangıç noktası seç.
-    Ardından başka bir mesajı yanıtlayarak /selectend → arası silinir."""
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
     reply = update.message.reply_to_message
-
     if not reply:
         m = await update.message.reply_text(
-            "📌 <b>Mesaj Seçimi</b>\n\n"
-            "Kullanım:\n"
-            "1️⃣ Silmenin <b>başlayacağı</b> mesajı yanıtla → <code>/select</code>\n"
-            "2️⃣ Silmenin <b>biteceği</b> mesajı yanıtla → <code>/selectend</code>\n\n"
-            "💡 Bu iki mesaj <b>arasındaki her şey</b> silinir.",
+            "📌 Silmenin başlayacağı mesajı yanıtla → <code>/select</code>\n"
+            "Bitiş mesajını yanıtla → <code>/selectend</code>",
             parse_mode=ParseMode.HTML,
         )
         asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 5))
         asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 10))
         return
-
     select_start[chat_id] = reply.message_id
     asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 3))
     m = await ctx.bot.send_message(
         chat_id,
-        f"✅ <b>Başlangıç noktası seçildi!</b>\n\n"
-        f"📍 Başlangıç mesaj ID: <code>{reply.message_id}</code>\n\n"
-        f"Şimdi <b>bitiş mesajını</b> yanıtlayıp <code>/selectend</code> yaz.\n"
-        f"İptal için <code>/selectcancel</code> yaz.",
+        f"✅ Başlangıç: <code>{reply.message_id}</code>\nBitiş için yanıtlayıp <code>/selectend</code> yaz.",
         parse_mode=ParseMode.HTML,
     )
     asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 15))
 
-
 async def cmd_selectend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/select ile başlangıç seçildikten sonra bitiş noktasını belirle ve sil."""
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
     reply   = update.message.reply_to_message
     asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 2))
-
     if chat_id not in select_start:
-        m = await update.message.reply_text(
-            "❌ Önce <code>/select</code> ile başlangıç noktası seçmelisin!",
-            parse_mode=ParseMode.HTML,
-        )
+        m = await update.message.reply_text("❌ Önce <code>/select</code> ile başlangıç seç!", parse_mode=ParseMode.HTML)
         asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 8))
         return
-
     if not reply:
-        m = await update.message.reply_text(
-            "❌ Bitiş noktası olarak bir mesajı yanıtlayıp <code>/selectend</code> yazmalısın!",
-            parse_mode=ParseMode.HTML,
-        )
+        m = await update.message.reply_text("❌ Bitiş noktası için bir mesajı yanıtla!", parse_mode=ParseMode.HTML)
         asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 8))
         return
-
-    from_id = select_start[chat_id]
-    to_id   = reply.message_id
-
-    # Küçük → büyük sırala
+    from_id  = select_start[chat_id]
+    to_id    = reply.message_id
     start_id = min(from_id, to_id)
     end_id   = max(from_id, to_id)
     count    = end_id - start_id + 1
-
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"✅ Evet, {count} mesajı sil!", callback_data=f"select_confirm:{start_id}:{end_id}"),
-        InlineKeyboardButton("❌ İptal",                      callback_data="select_cancel"),
+        InlineKeyboardButton(f"✅ Evet, ~{count} mesajı sil!", callback_data=f"select_confirm:{start_id}:{end_id}"),
+        InlineKeyboardButton("❌ İptal", callback_data="select_cancel"),
     ]])
     await ctx.bot.send_message(
         chat_id,
-        f"⚠️ <b>Seçim Tamamlandı — Onay Gerekiyor</b>\n\n"
-        f"📍 Başlangıç: <code>{start_id}</code>\n"
-        f"📍 Bitiş: <code>{end_id}</code>\n"
-        f"🗑️ Silinecek mesaj aralığı: <b>~{count} mesaj</b>\n\n"
-        f"<i>Not: Bazı mesajlar zaten silinmiş ya da mevcut olmayabilir.</i>\n\n"
-        f"Bu işlem <b>geri alınamaz!</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb,
+        f"⚠️ <code>{start_id}</code> → <code>{end_id}</code> arası ~<b>{count}</b> mesaj silinecek.\nGeri alınamaz!",
+        parse_mode=ParseMode.HTML, reply_markup=kb,
     )
-    # Seçimi temizle
     del select_start[chat_id]
 
-
 async def cmd_selectcancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Aktif seçimi iptal et."""
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
     asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 2))
@@ -1794,16 +1730,14 @@ async def cmd_selectcancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         m = await update.message.reply_text("ℹ️ Aktif seçim yok.")
     asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 5))
 
-
 async def cmd_clearall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    mid = update.message.message_id
-    kb  = InlineKeyboardMarkup([[
+    kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Evet, 100 mesajı sil!", callback_data="purge_confirm:100"),
         InlineKeyboardButton("❌ İptal", callback_data="menu_msgs"),
     ]])
     await update.message.reply_text(
-        "⚠️ <b>Son 100 mesajı silmek istediğine emin misin?</b>\nBu işlem geri alınamaz!",
+        "⚠️ Son 100 mesajı silmek istediğine emin misin? Geri alınamaz!",
         parse_mode=ParseMode.HTML, reply_markup=kb,
     )
 
@@ -1833,42 +1767,38 @@ async def cmd_unlock(u, c):
 async def cmd_slowmode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global slowmode_sec
     if not is_admin(update.effective_user.id): return
-    if not ctx.args or not ctx.args[0].isdigit(): await update.message.reply_text("Kullanım: /slowmode [sn]"); return
-    slowmode_sec = int(ctx.args[0])
-    await ctx.bot.set_chat_slow_mode_delay(GROUP_ID, slowmode_sec)
-    await update.message.reply_text(f"🐌 Yavaş mod: {slowmode_sec}sn")
+    if not ctx.args or not ctx.args[0].isdigit():
+        valid_str = ", ".join(str(v) for v in VALID_SLOWMODE)
+        await update.message.reply_text(
+            f"Kullanım: /slowmode [sn]\nGeçerli değerler: {valid_str}"
+        )
+        return
+    requested = int(ctx.args[0])
+    actual    = nearest_slowmode(requested)
+    try:
+        await ctx.bot.set_chat_slow_mode_delay(GROUP_ID, actual)
+        slowmode_sec = actual
+        save_data()
+        note = f" (girildi: {requested}sn, uygulandı: {actual}sn)" if actual != requested else ""
+        await update.message.reply_text(f"🐌 Yavaş mod: {actual}sn{note}")
+    except TelegramError as e:
+        await update.message.reply_text(f"❌ Hata: {e}")
 
 async def cmd_setwelcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global welcome_msg
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /setwelcome [metin]"); return
     welcome_msg = " ".join(ctx.args)
-    await update.message.reply_text(f"✅ Karşılama güncellendi.")
-
-async def cmd_addban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if not ctx.args: await update.message.reply_text("Kullanım: /addban [kelime]"); return
-    word = " ".join(ctx.args).lower()
-    if word not in banned_words: banned_words.append(word)
-    await update.message.reply_text(f"✅ '{word}' eklendi.")
-
-async def cmd_removeban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if not ctx.args: await update.message.reply_text("Kullanım: /removeban [kelime]"); return
-    word = " ".join(ctx.args).lower()
-    if word in banned_words: banned_words.remove(word); await update.message.reply_text(f"✅ '{word}' kaldırıldı.")
-    else: await update.message.reply_text("❌ Listede yok.")
-
-async def cmd_listban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if not banned_words: await update.message.reply_text("📋 Liste boş."); return
-    await update.message.reply_text("📋 Yasaklı: " + ", ".join(f"`{w}`" for w in banned_words))
+    save_data()
+    await update.message.reply_text("✅ Karşılama güncellendi.")
 
 async def cmd_autodelete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global auto_delete_sec
     if not is_admin(update.effective_user.id): return
-    if not ctx.args or not ctx.args[0].isdigit(): await update.message.reply_text("Kullanım: /autodelete [sn]"); return
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.message.reply_text("Kullanım: /autodelete [sn]"); return
     auto_delete_sec = int(ctx.args[0])
+    save_data()
     await update.message.reply_text(f"✅ Otomatik silme: {auto_delete_sec}sn")
 
 async def cmd_antiflood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1876,12 +1806,16 @@ async def cmd_antiflood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /antiflood [on/off]"); return
     antiflood_on = ctx.args[0].lower() == "on"
+    save_data()
     await update.message.reply_text(f"🌊 Anti-flood: {'Aktif ✅' if antiflood_on else 'Pasif ❌'}")
 
 async def cmd_newlink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    link = await ctx.bot.export_chat_invite_link(GROUP_ID)
-    await update.message.reply_text(f"🔗 Yeni link:\n{link}")
+    try:
+        link = await ctx.bot.export_chat_invite_link(GROUP_ID)
+        await update.message.reply_text(f"🔗 Yeni link:\n{link}")
+    except TelegramError as e:
+        await update.message.reply_text(f"❌ Hata: {e}")
 
 async def cmd_note(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args: await update.message.reply_text("Kullanım: /note [ad]"); return
@@ -1897,14 +1831,44 @@ async def cmd_savenote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args or len(ctx.args) < 2: await update.message.reply_text("Kullanım: /savenote [ad] [metin]"); return
     notes[ctx.args[0].lower()] = " ".join(ctx.args[1:])
-    await update.message.reply_text(f"✅ Not kaydedildi.")
+    save_data()
+    await update.message.reply_text("✅ Not kaydedildi.")
 
 async def cmd_deletenote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /deletenote [ad]"); return
     name = ctx.args[0].lower()
-    if name in notes: del notes[name]; await update.message.reply_text(f"✅ Silindi.")
-    else: await update.message.reply_text("❌ Bulunamadı.")
+    if name in notes:
+        del notes[name]
+        save_data()
+        await update.message.reply_text("✅ Silindi.")
+    else:
+        await update.message.reply_text("❌ Bulunamadı.")
+
+async def cmd_addban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Kullanım: /addban [kelime]"); return
+    word = " ".join(ctx.args).lower()
+    if word not in banned_words:
+        banned_words.append(word)
+        save_data()
+    await update.message.reply_text(f"✅ '{word}' eklendi.")
+
+async def cmd_removeban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Kullanım: /removeban [kelime]"); return
+    word = " ".join(ctx.args).lower()
+    if word in banned_words:
+        banned_words.remove(word)
+        save_data()
+        await update.message.reply_text(f"✅ '{word}' kaldırıldı.")
+    else:
+        await update.message.reply_text("❌ Listede yok.")
+
+async def cmd_listban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    if not banned_words: await update.message.reply_text("📋 Liste boş."); return
+    await update.message.reply_text("📋 Yasaklı: " + ", ".join(f"`{w}`" for w in banned_words))
 
 async def cmd_groupinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
@@ -1915,9 +1879,8 @@ async def cmd_membercount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👥 Üye sayısı: <b>{count}</b>", parse_mode=ParseMode.HTML)
 
 async def cmd_topdavetci(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Davet liderlik tablosunu gruba veya DM'e gönderir."""
     if not invite_tracker:
-        await update.message.reply_text("📭 Henüz davet verisi yok.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("📭 Henüz davet verisi yok.")
         return
     sorted_inv = sorted(invite_tracker.items(), key=lambda x: x[1]["count"], reverse=True)
     medals = ["🥇", "🥈", "🥉"]
@@ -1925,9 +1888,8 @@ async def cmd_topdavetci(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for i, (iuid, idata) in enumerate(sorted_inv[:20]):
         medal = medals[i] if i < 3 else f"{i+1}."
         lines.append(f"{medal} <a href='tg://user?id={iuid}'>{idata['name']}</a> — <b>{idata['count']}</b> davet")
-    board_text = "\n".join(lines)
     await update.message.reply_text(
-        f"🏆 <b>Davet Liderlik Tablosu</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n{board_text}",
+        f"🏆 <b>Davet Liderlik Tablosu</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" + "\n".join(lines),
         parse_mode=ParseMode.HTML,
     )
 
@@ -1944,14 +1906,18 @@ async def cmd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 # ──────────────────────────────────────────────────────────────
-# YENİ ÜYE KARŞILAMA
+# YENİ ÜYE KARŞILAMA — Sadece handle_new_member kullanılıyor
+# (handle_chat_member davet takibi için, karşılama mesajı göndermez)
 # ──────────────────────────────────────────────────────────────
 async def handle_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for member in update.message.new_chat_members:
         if member.is_bot: continue
-        text = welcome_msg.format(
-            name=member.full_name, id=member.id, group=update.effective_chat.title,
-        )
+        try:
+            text = welcome_msg.format(
+                name=member.full_name, id=member.id, group=update.effective_chat.title,
+            )
+        except KeyError:
+            text = welcome_msg  # format hatası olursa olduğu gibi gönder
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("📢 KriptoDrop TR DUYURU KANALI", url="https://t.me/kriptodropduyuru"),
@@ -1961,16 +1927,10 @@ async def handle_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❓ Sıkça Sorulan Sorular (SSS)", url="https://t.me/kriptodropduyuru/47"),
             ],
         ])
-        m  = await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        m = await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         if auto_delete_sec > 0:
             asyncio.create_task(auto_delete(ctx, update.effective_chat.id, m.message_id, auto_delete_sec))
-        # ── Davet takibi ──────────────────────────────────────
-        # Telegram Bot API'si davet linkini kullananı doğrudan vermez.
-        # Davet kaydı: eğer "invite_link" bilgisi varsa ya da
-        # update.message.from_user farklı biri ise onu tut.
-        # Basit yöntem: bir adminon manuel kayıt için /davetekle komutu,
-        # otomatik olarak ise chat_member update üzerinden izlenir.
-        # Burada ChatMemberUpdated handler ile yakalanır (aşağıda eklendi).
+        # Admin bildirimi — sadece handle_new_member'dan gönder
         await notify_admin(ctx, f"👤 Yeni üye: {fmt(member)} (ID: <code>{member.id}</code>) gruba katıldı.")
 
 # ──────────────────────────────────────────────────────────────
@@ -2008,12 +1968,12 @@ async def filter_messages(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode=ParseMode.HTML,
                 )
                 asyncio.create_task(auto_delete(ctx, msg.chat_id, m.message_id, 5))
-                await notify_admin(ctx, f"🚫 Yasaklı kelime tespit edildi!\n👤 {fmt(user)}\n🔤 Kelime: <code>{word}</code>")
+                await notify_admin(ctx, f"🚫 Yasaklı kelime!\n👤 {fmt(user)}\n🔤 Kelime: <code>{word}</code>")
             except TelegramError:
                 pass
             return
 
-    # Anti-flood (10sn'de 5+ mesaj → 5dk mute)
+    # Anti-flood
     if antiflood_on:
         now = datetime.now()
         uid = user.id
@@ -2033,7 +1993,7 @@ async def filter_messages(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode=ParseMode.HTML,
                 )
                 asyncio.create_task(auto_delete(ctx, msg.chat_id, m.message_id, 10))
-                await notify_admin(ctx, f"🌊 Flood koruması devreye girdi!\n👤 {fmt(user)} (ID: <code>{uid}</code>) 5dk susturuldu.")
+                await notify_admin(ctx, f"🌊 Flood koruması!\n👤 {fmt(user)} (ID: <code>{uid}</code>) 5dk susturuldu.")
                 antiflood_buf[uid] = []
             except TelegramError:
                 pass
@@ -2043,12 +2003,11 @@ async def filter_messages(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(auto_delete(ctx, msg.chat_id, msg.message_id, auto_delete_sec))
 
 # ──────────────────────────────────────────────────────────────
-# ZAMANLANAN DUYURU — Gönderici ve Scheduler
+# ZAMANLANAN DUYURU
 # ──────────────────────────────────────────────────────────────
-_scheduler: AsyncIOScheduler | None = None
+_scheduler: AsyncIOScheduler = None
 
 async def _send_scheduled_msg(ctx):
-    """Zamanlı duyuru butonlarıyla gruba gönderir."""
     if not scheduled_msg_on:
         return
     kb = InlineKeyboardMarkup([
@@ -2061,18 +2020,12 @@ async def _send_scheduled_msg(ctx):
         ],
     ])
     try:
-        await ctx.bot.send_message(
-            GROUP_ID,
-            scheduled_msg_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb,
-        )
+        await ctx.bot.send_message(GROUP_ID, scheduled_msg_text, parse_mode=ParseMode.HTML, reply_markup=kb)
         logger.info("✅ Zamanlı duyuru gönderildi.")
     except TelegramError as e:
         logger.error(f"Zamanlı duyuru hatası: {e}")
 
 def _reschedule(ctx):
-    """Scheduler'daki zamanlı duyuru jobını saat değiştiğinde günceller."""
     global _scheduler
     if _scheduler is None:
         return
@@ -2081,17 +2034,17 @@ def _reschedule(ctx):
             "daily_msg",
             trigger=CronTrigger(hour=scheduled_msg_hour, minute=scheduled_msg_min),
         )
-        logger.info(f"⏰ Zamanlı duyuru saati güncellendi: {scheduled_msg_hour:02d}:{scheduled_msg_min:02d} UTC")
+        logger.info(f"⏰ Zamanlı duyuru saati: {scheduled_msg_hour:02d}:{scheduled_msg_min:02d} UTC")
     except Exception as e:
         logger.error(f"Reschedule hatası: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# DAVET TAKİBİ — ChatMemberUpdated handler
+# DAVET TAKİBİ — Sadece davetçiyi takip eder, bildirim göndermez
+# (Çift bildirim önlemek için karşılama handle_new_member'da yapılıyor)
 # ──────────────────────────────────────────────────────────────
 from telegram.ext import ChatMemberHandler
 
 async def handle_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Gruba katılımları ChatMemberUpdated üzerinden izler ve davetçiyi kaydeder."""
     result = update.chat_member
     if not result:
         return
@@ -2099,21 +2052,21 @@ async def handle_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     old_status = result.old_chat_member.status
     new_status = result.new_chat_member.status
-    # Yeni katılım: left/kicked → member/administrator
     joined = (
         old_status in ("left", "kicked")
         and new_status in ("member", "administrator", "creator")
     )
     if not joined:
         return
-    inviter = result.from_user  # Davet eden kişi (link oluşturan veya ekleyen)
+    inviter     = result.from_user
     joined_user = result.new_chat_member.user
     if inviter and inviter.id != joined_user.id and not inviter.is_bot:
         iid = inviter.id
         if iid not in invite_tracker:
             invite_tracker[iid] = {"name": inviter.full_name, "count": 0}
         invite_tracker[iid]["count"] += 1
-        invite_tracker[iid]["name"]   = inviter.full_name  # güncelle
+        invite_tracker[iid]["name"]   = inviter.full_name
+        save_data()
         logger.info(f"📨 {inviter.full_name} davet etti → toplam {invite_tracker[iid]['count']}")
 
 # ──────────────────────────────────────────────────────────────
@@ -2123,11 +2076,11 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Hata: {ctx.error}", exc_info=ctx.error)
 
 # ──────────────────────────────────────────────────────────────
-# POST INIT — Komut listeleri
+# POST INIT
 # ──────────────────────────────────────────────────────────────
 async def post_init(app: Application):
     global _scheduler
-    # DM'de tüm komutlar görünsün (sadece admin DM açabilir zaten)
+
     dm_cmds = [
         BotCommand("start",        "🤖 Yönetim Panelini Aç"),
         BotCommand("help",         "📋 Tüm Komutları Listele"),
@@ -2138,7 +2091,6 @@ async def post_init(app: Application):
         BotCommand("broadcast",    "📣 Gruba Duyuru Gönder"),
         BotCommand("topdavetci",   "🏆 Davet Liderlik Tablosu"),
     ]
-    # Grupta sadece /start görünsün
     group_cmds = [
         BotCommand("start",        "🤖 Yönetim Paneli"),
         BotCommand("select",       "📌 Aralık Seçimi Başlat"),
@@ -2148,9 +2100,8 @@ async def post_init(app: Application):
     ]
     await app.bot.set_my_commands(dm_cmds,    scope=BotCommandScopeAllPrivateChats())
     await app.bot.set_my_commands(group_cmds, scope=BotCommandScopeAllGroupChats())
-    logger.info("✅ Komut listeleri Telegram'a kaydedildi.")
+    logger.info("✅ Komut listeleri kaydedildi.")
 
-    # ── Zamanlı duyuru scheduler ──────────────────────────
     _scheduler = AsyncIOScheduler(timezone="UTC")
     _scheduler.add_job(
         lambda: asyncio.ensure_future(_send_scheduled_msg(app)),
@@ -2159,7 +2110,7 @@ async def post_init(app: Application):
         replace_existing=True,
     )
     _scheduler.start()
-    logger.info(f"⏰ Zamanlı duyuru aktif: her gün {scheduled_msg_hour:02d}:{scheduled_msg_min:02d} UTC")
+    logger.info(f"⏰ Zamanlı duyuru aktif: {scheduled_msg_hour:02d}:{scheduled_msg_min:02d} UTC")
 
 # ──────────────────────────────────────────────────────────────
 # MAIN
@@ -2170,7 +2121,6 @@ def main():
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
 
-    # Komutlar
     for name, fn in [
         ("ban",cmd_ban),("unban",cmd_unban),("kick",cmd_kick),("mute",cmd_mute),
         ("unmute",cmd_unmute),("warn",cmd_warn),("unwarn",cmd_unwarn),

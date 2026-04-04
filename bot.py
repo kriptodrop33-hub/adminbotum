@@ -1,10 +1,11 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║          TELEGRAM GRUP YÖNETİM BOTU  v3.1                   ║
+║          TELEGRAM GRUP YÖNETİM BOTU  v3.2                   ║
 ║  • Tüm işlemler DM'deki inline butonlardan yapılır           ║
 ║  • Bot senden adım adım bilgi ister (ID, miktar vs.)         ║
 ║  • Açıklayıcı, uzun panel metinleri                          ║
-║  • Grupta /komut yazınca BotFather listesi görünür           ║
+║  • Grupta /komut yazılınca mesaj otomatik silinir            ║
+║  • Grupta BotFather komut menüsü görünmez                   ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -138,6 +139,31 @@ VALID_SLOWMODE = [0, 10, 30, 45, 60, 90, 180, 300, 600, 900]
 # ──────────────────────────────────────────────────────────────
 def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
+
+# Bot kullanıcı adı — post_init'te ayarlanır
+BOT_USERNAME: str = ""
+
+def _is_for_me(update: Update) -> bool:
+    """Grupta yazılan komutun bu bota mı hedeflendiğini kontrol eder.
+    /cmd@botusername → True (bu bota hedeflenmiş)
+    /cmd             → False (hedeflenmemiş, diğer botlar etkilenmesin)
+    DM'de her zaman True döner."""
+    chat = update.effective_chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return True  # DM'de her zaman işle
+    msg = update.message
+    if not msg or not msg.entities:
+        return False
+    for entity in msg.entities:
+        if entity.type == "bot_command":
+            cmd_text = msg.text[entity.offset:entity.offset + entity.length]
+            if "@" in cmd_text:
+                # /cmd@username formatı — bu bota mı?
+                return cmd_text.split("@")[1].lower() == BOT_USERNAME.lower()
+            else:
+                # Hedeflenmemiş /cmd — diğer botları etkilememek için yoksay
+                return False
+    return False
 
 def fmt(user) -> str:
     return f'<a href="tg://user?id={user.id}">{user.full_name}</a>'
@@ -561,18 +587,21 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        if not is_admin(user.id):
-            try:
-                await update.message.delete()
-            except TelegramError:
-                pass
+        # Grupta hedeflenmemiş komutu yoksa → diğer botlara dokunma
+        if not _is_for_me(update):
             return
-        m = await update.message.reply_text(
-            "🤖 Yönetim paneli için DM'e geç 👉 @me",
-            parse_mode=ParseMode.HTML,
-        )
-        asyncio.create_task(auto_delete(ctx, chat.id, m.message_id, 8))
-        asyncio.create_task(auto_delete(ctx, chat.id, update.message.message_id, 8))
+        # Bu bota hedeflenmiş komut → mesajı sil ve DM'e yönlendir
+        try:
+            await update.message.delete()
+        except TelegramError:
+            pass
+        if is_admin(user.id):
+            m = await ctx.bot.send_message(
+                chat.id,
+                "🤖 Yönetim paneli için DM'e geç 👉 @me",
+                parse_mode=ParseMode.HTML,
+            )
+            asyncio.create_task(auto_delete(ctx, chat.id, m.message_id, 8))
         return
 
     if not is_admin(user.id):
@@ -584,20 +613,20 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        if not is_admin(update.effective_user.id): return
-        await update.message.reply_text(
-            "📋 <b>Tüm Komutlar</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "<b>👥</b> /ban /unban /kick /mute /unmute /warn /unwarn /promote /demote\n"
-            "<b>📢</b> /pin /unpin /delete /purge [n] /clearall /broadcast /poll\n"
-            "<b>📌</b> /purgefrom /select /selectend /selectcancel\n"
-            "<b>⚙️</b> /lock /unlock /slowmode /setwelcome /autodelete /antiflood /newlink\n"
-            "<b>🛡️</b> /addban /removeban /listban\n"
-            "<b>📝</b> /savenote /note /notes /deletenote\n"
-            "<b>📊</b> /info /groupinfo /membercount /stats /id\n\n"
-            "💡 DM'den /start ile görsel paneli kullan!",
-            parse_mode=ParseMode.HTML,
-        )
+        if not _is_for_me(update):
+            return
+        try:
+            await update.message.delete()
+        except TelegramError:
+            pass
+        if is_admin(update.effective_user.id):
+            m = await ctx.bot.send_message(
+                chat.id,
+                "💡 Yönetim paneli için DM'den /start yaz!",
+                parse_mode=ParseMode.HTML,
+            )
+            asyncio.create_task(auto_delete(ctx, chat.id, m.message_id, 8))
+        return
     else:
         await cmd_start(update, ctx)
 
@@ -1574,6 +1603,15 @@ async def _exec_stats(msg):
 # GRUP KOMUTLARI
 # ──────────────────────────────────────────────────────────────
 async def _group_cmd(update, ctx, action):
+    # Grupta hedeflenmemiş komutları yoksay (diğer botlar için)
+    chat = update.effective_chat
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if not _is_for_me(update):
+            return
+        try:
+            await update.message.delete()
+        except TelegramError:
+            pass
     if not is_admin(update.effective_user.id): return
     if ctx.args:
         text = " ".join(ctx.args)
@@ -1604,31 +1642,39 @@ async def cmd_warnings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _group_cmd(update, ctx, "warnings")
 
 async def cmd_pin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if update.message.reply_to_message:
         try:
             await ctx.bot.pin_chat_message(GROUP_ID, update.message.reply_to_message.message_id)
-            await update.message.reply_text("📌 Mesaj sabitlendi.")
         except TelegramError as e:
-            await update.message.reply_text(f"❌ Hata: {e}")
-    else:
-        await update.message.reply_text("❌ Sabitlemek için bir mesajı yanıtlayın.")
+            await notify_admin(ctx, f"❌ Pin hatası: {e}")
 
 async def cmd_unpin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     await _exec_unpin(update.message, ctx)
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if update.message.reply_to_message:
         try:
             await ctx.bot.delete_message(GROUP_ID, update.message.reply_to_message.message_id)
-            await update.message.delete()
             stats["deleted_messages"] += 1
         except TelegramError as e:
-            await update.message.reply_text(f"❌ Hata: {e}")
+            await notify_admin(ctx, f"❌ Silme hatası: {e}")
 
 async def cmd_purge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args or not ctx.args[0].isdigit():
         await update.message.reply_text("Kullanım: /purge [n]"); return
@@ -1646,6 +1692,9 @@ async def cmd_purge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 5))
 
 async def cmd_purgefrom(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
     reply = update.message.reply_to_message
@@ -1669,6 +1718,9 @@ async def cmd_purgefrom(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 1))
 
 async def cmd_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
     reply = update.message.reply_to_message
@@ -1691,6 +1743,9 @@ async def cmd_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 15))
 
 async def cmd_selectend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
     reply   = update.message.reply_to_message
@@ -1720,6 +1775,9 @@ async def cmd_selectend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     del select_start[chat_id]
 
 async def cmd_selectcancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     chat_id = update.effective_chat.id
     asyncio.create_task(auto_delete(ctx, chat_id, update.message.message_id, 2))
@@ -1731,6 +1789,9 @@ async def cmd_selectcancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(auto_delete(ctx, chat_id, m.message_id, 5))
 
 async def cmd_clearall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Evet, 100 mesajı sil!", callback_data="purge_confirm:100"),
@@ -1742,30 +1803,45 @@ async def cmd_clearall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
-    if not ctx.args: await update.message.reply_text("Kullanım: /broadcast [metin]"); return
+    if not ctx.args: return
     text = " ".join(ctx.args)
     await ctx.bot.send_message(GROUP_ID, f"📢 <b>DUYURU</b>\n━━━━━━━━━━━━━━━━\n{text}", parse_mode=ParseMode.HTML)
     await update.message.reply_text("✅ Duyuru gönderildi.")
 
 async def cmd_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
-    if not ctx.args: await update.message.reply_text("Kullanım: /poll Soru|Seç1|Seç2"); return
+    if not ctx.args: return
     parts = " ".join(ctx.args).split("|")
     if len(parts) < 3: await update.message.reply_text("❌ En az 1 soru + 2 seçenek"); return
     await ctx.bot.send_poll(GROUP_ID, parts[0].strip(), [p.strip() for p in parts[1:] if p.strip()], is_anonymous=False)
     await update.message.reply_text("✅ Anket oluşturuldu.")
 
 async def cmd_lock(u, c):
+    if not _is_for_me(u): return
+    try: await u.message.delete()
+    except TelegramError: pass
     if not is_admin(u.effective_user.id): return
     await _exec_lock(u.message, c, lock=True)
 
 async def cmd_unlock(u, c):
+    if not _is_for_me(u): return
+    try: await u.message.delete()
+    except TelegramError: pass
     if not is_admin(u.effective_user.id): return
     await _exec_lock(u.message, c, lock=False)
 
 async def cmd_slowmode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global slowmode_sec
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args or not ctx.args[0].isdigit():
         valid_str = ", ".join(str(v) for v in VALID_SLOWMODE)
@@ -1786,6 +1862,9 @@ async def cmd_slowmode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_setwelcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global welcome_msg
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /setwelcome [metin]"); return
     welcome_msg = " ".join(ctx.args)
@@ -1794,6 +1873,9 @@ async def cmd_setwelcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_autodelete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global auto_delete_sec
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args or not ctx.args[0].isdigit():
         await update.message.reply_text("Kullanım: /autodelete [sn]"); return
@@ -1803,6 +1885,9 @@ async def cmd_autodelete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_antiflood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global antiflood_on
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /antiflood [on/off]"); return
     antiflood_on = ctx.args[0].lower() == "on"
@@ -1810,6 +1895,9 @@ async def cmd_antiflood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🌊 Anti-flood: {'Aktif ✅' if antiflood_on else 'Pasif ❌'}")
 
 async def cmd_newlink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     try:
         link = await ctx.bot.export_chat_invite_link(GROUP_ID)
@@ -1818,16 +1906,21 @@ async def cmd_newlink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Hata: {e}")
 
 async def cmd_note(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
     if not ctx.args: await update.message.reply_text("Kullanım: /note [ad]"); return
     name = ctx.args[0].lower()
     if name not in notes: await update.message.reply_text(f"❌ '{name}' bulunamadı."); return
     await update.message.reply_text(f"📝 <b>{name}</b>\n━━━━━━━━━━\n{notes[name]}", parse_mode=ParseMode.HTML)
 
 async def cmd_notes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
     if not notes: await update.message.reply_text("📋 Not yok."); return
     await update.message.reply_text("📋 Notlar:\n" + "\n".join(f"• #{k}" for k in notes.keys()))
 
 async def cmd_savenote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args or len(ctx.args) < 2: await update.message.reply_text("Kullanım: /savenote [ad] [metin]"); return
     notes[ctx.args[0].lower()] = " ".join(ctx.args[1:])
@@ -1835,6 +1928,9 @@ async def cmd_savenote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Not kaydedildi.")
 
 async def cmd_deletenote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /deletenote [ad]"); return
     name = ctx.args[0].lower()
@@ -1846,6 +1942,9 @@ async def cmd_deletenote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Bulunamadı.")
 
 async def cmd_addban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /addban [kelime]"); return
     word = " ".join(ctx.args).lower()
@@ -1855,6 +1954,9 @@ async def cmd_addban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ '{word}' eklendi.")
 
 async def cmd_removeban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not ctx.args: await update.message.reply_text("Kullanım: /removeban [kelime]"); return
     word = " ".join(ctx.args).lower()
@@ -1866,19 +1968,31 @@ async def cmd_removeban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Listede yok.")
 
 async def cmd_listban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     if not banned_words: await update.message.reply_text("📋 Liste boş."); return
     await update.message.reply_text("📋 Yasaklı: " + ", ".join(f"`{w}`" for w in banned_words))
 
 async def cmd_groupinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     await _exec_groupinfo(update.message, ctx)
 
 async def cmd_membercount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     count = await ctx.bot.get_chat_member_count(GROUP_ID)
     await update.message.reply_text(f"👥 Üye sayısı: <b>{count}</b>", parse_mode=ParseMode.HTML)
 
 async def cmd_topdavetci(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not invite_tracker:
         await update.message.reply_text("📭 Henüz davet verisi yok.")
         return
@@ -1894,10 +2008,16 @@ async def cmd_topdavetci(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     if not is_admin(update.effective_user.id): return
     await _exec_stats(update.message)
 
 async def cmd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_for_me(update): return
+    try: await update.message.delete()
+    except TelegramError: pass
     u = update.effective_user
     c = update.effective_chat
     await update.message.reply_text(
@@ -2091,15 +2211,9 @@ async def post_init(app: Application):
         BotCommand("broadcast",    "📣 Gruba Duyuru Gönder"),
         BotCommand("topdavetci",   "🏆 Davet Liderlik Tablosu"),
     ]
-    group_cmds = [
-        BotCommand("start",        "🤖 Yönetim Paneli"),
-        BotCommand("select",       "📌 Aralık Seçimi Başlat"),
-        BotCommand("selectend",    "✅ Aralık Seçimini Bitir"),
-        BotCommand("selectcancel", "❌ Seçimi İptal Et"),
-        BotCommand("topdavetci",   "🏆 Davet Sıralaması"),
-    ]
     await app.bot.set_my_commands(dm_cmds,    scope=BotCommandScopeAllPrivateChats())
-    await app.bot.set_my_commands(group_cmds, scope=BotCommandScopeAllGroupChats())
+    # Grupta komut menüsü görünmesin — boş liste ile sıfırla
+    await app.bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
     logger.info("✅ Komut listeleri kaydedildi.")
 
     _scheduler = AsyncIOScheduler(timezone="UTC")

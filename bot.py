@@ -2199,8 +2199,20 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 # POST INIT
 # ──────────────────────────────────────────────────────────────
 async def post_init(app: Application):
-    global _scheduler
+    global _scheduler, BOT_USERNAME
 
+    # Bot kullanıcı adını kaydet (grup komut filtrelemesi için)
+    me = await app.bot.get_me()
+    BOT_USERNAME = me.username or ""
+    logger.info(f"🤖 Bot kullanıcı adı: @{BOT_USERNAME}")
+
+    # ─── KOMUT MENÜSÜ AYARLARI ───────────────────────────────
+    # 1) Önce TÜM kapsamlardaki komutları sil
+    await app.bot.delete_my_commands()                                      # varsayılan kapsam
+    await app.bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())  # grup kapsamı
+    await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats()) # DM kapsamı (yeniden ayarlanacak)
+
+    # 2) Sadece DM (özel mesaj) kapsamında komutları ayarla
     dm_cmds = [
         BotCommand("start",        "🤖 Yönetim Panelini Aç"),
         BotCommand("help",         "📋 Tüm Komutları Listele"),
@@ -2211,10 +2223,8 @@ async def post_init(app: Application):
         BotCommand("broadcast",    "📣 Gruba Duyuru Gönder"),
         BotCommand("topdavetci",   "🏆 Davet Liderlik Tablosu"),
     ]
-    await app.bot.set_my_commands(dm_cmds,    scope=BotCommandScopeAllPrivateChats())
-    # Grupta komut menüsü görünmesin — boş liste ile sıfırla
-    await app.bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
-    logger.info("✅ Komut listeleri kaydedildi.")
+    await app.bot.set_my_commands(dm_cmds, scope=BotCommandScopeAllPrivateChats())
+    logger.info("✅ Komut listeleri kaydedildi (grupta komut menüsü gizli).")
 
     _scheduler = AsyncIOScheduler(timezone="UTC")
     _scheduler.add_job(
